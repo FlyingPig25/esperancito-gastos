@@ -3,7 +3,9 @@ import { google } from "googleapis";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID!;
-const GOOGLE_CREDENTIALS = JSON.parse(process.env.GOOGLE_CREDENTIALS!);
+const GOOGLE_CREDENTIALS = JSON.parse(
+  process.env.GOOGLE_CREDENTIALS!
+);
 
 const bot = new Telegraf(TOKEN);
 
@@ -60,8 +62,8 @@ const aliases: Record<string, string> = {
   impuestos: "Impuestos",
   rentas: "Impuestos",
 
-  viajes: "Viajes",
   viaje: "Viajes",
+  viajes: "Viajes",
   hotel: "Viajes",
 
   regalo: "Regalos",
@@ -109,13 +111,12 @@ async function asegurarPestaña(nombre: string) {
     spreadsheetId: SPREADSHEET_ID,
   });
 
-  const existe = libro.data.sheets?.some(
-    (hoja) =>
-      hoja.properties?.title?.trim().toLowerCase() ===
-      nombre.toLowerCase()
-  );
+  const nombres =
+    libro.data.sheets?.map(
+      hoja => hoja.properties?.title ?? ""
+    ) ?? [];
 
-  if (!existe) {
+  if (!nombres.includes(nombre)) {
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: SPREADSHEET_ID,
       requestBody: {
@@ -137,11 +138,11 @@ async function asegurarPestaña(nombre: string) {
 
 async function asegurarEstructura() {
   await asegurarPestaña("gastos");
-  await asegurarPestaña("totales");
+  await asegurarPestaña("resumen");
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
-    range: "'gastos'!A1:E1",
+    range: "gastos!A1:E1",
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: [[
@@ -155,10 +156,10 @@ async function asegurarEstructura() {
   });
 }
 
-async function actualizarTotales() {
+async function actualizarResumen() {
   const respuesta = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: "'gastos'!A2:E",
+    range: "gastos!A2:E",
   });
 
   const gastos = respuesta.data.values ?? [];
@@ -212,19 +213,19 @@ async function actualizarTotales() {
 
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SPREADSHEET_ID,
-    range: "'totales'!A:D",
+    range: "resumen!A:D",
   });
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
-    range: "'totales'!A1",
+    range: "resumen!A1",
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: filas,
     },
   });
 
-  console.log("✅ Totales actualizados");
+  console.log("✅ Resumen actualizado");
 }
 
 bot.on("text", async (ctx) => {
@@ -257,11 +258,10 @@ bot.on("text", async (ctx) => {
         : ""
     }`;
 
-  // PRIMERO: guardar el gasto
   try {
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: "'gastos'!A:E",
+      range: "gastos!A:E",
       valueInputOption: "USER_ENTERED",
       insertDataOption: "INSERT_ROWS",
       requestBody: {
@@ -275,10 +275,7 @@ bot.on("text", async (ctx) => {
       },
     });
   } catch (error) {
-    console.error(
-      "❌ Error guardando gasto:",
-      error
-    );
+    console.error("❌ Error guardando gasto:", error);
 
     await ctx.reply(
       "❌ No pude guardar el gasto."
@@ -287,17 +284,15 @@ bot.on("text", async (ctx) => {
     return;
   }
 
-  // SEGUNDO: actualizar totales
   try {
-    await actualizarTotales();
+    await actualizarResumen();
   } catch (error) {
     console.error(
-      "⚠️ El gasto se guardó, pero falló totales:",
+      "⚠️ Gasto guardado, pero falló el resumen:",
       error
     );
   }
 
-  // Si llegamos acá, EL GASTO SE GUARDÓ
   await ctx.reply(
     `✅ ${categoria} — $${monto.toLocaleString("es-AR")}`
   );
@@ -305,13 +300,19 @@ bot.on("text", async (ctx) => {
 
 async function iniciar() {
   await asegurarEstructura();
-  await actualizarTotales();
+
+  try {
+    await actualizarResumen();
+  } catch (error) {
+    console.error(
+      "⚠️ No pude actualizar el resumen al iniciar:",
+      error
+    );
+  }
 
   await bot.launch();
 
-  console.log(
-    "🤖 Esperancito está funcionando"
-  );
+  console.log("🤖 Esperancito está funcionando");
 }
 
 iniciar().catch((error) => {
