@@ -82,12 +82,12 @@ function normalizarCategoria(texto: string) {
 }
 
 function convertirMonto(texto: string) {
-  const limpio = texto
-    .replace("$", "")
-    .replace(/\./g, "")
-    .replace(",", ".");
-
-  return Number(limpio);
+  return Number(
+    texto
+      .replace("$", "")
+      .replace(/\./g, "")
+      .replace(",", ".")
+  );
 }
 
 function fechaArgentina() {
@@ -104,10 +104,61 @@ function horaArgentina() {
   });
 }
 
+async function asegurarPestaña(nombre: string) {
+  const libro = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+  });
+
+  const existe = libro.data.sheets?.some(
+    (hoja) =>
+      hoja.properties?.title?.trim().toLowerCase() ===
+      nombre.toLowerCase()
+  );
+
+  if (!existe) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [
+          {
+            addSheet: {
+              properties: {
+                title: nombre,
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    console.log(`✅ Pestaña "${nombre}" creada`);
+  }
+}
+
+async function asegurarEstructura() {
+  await asegurarPestaña("gastos");
+  await asegurarPestaña("totales");
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "'gastos'!A1:E1",
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[
+        "Fecha",
+        "Hora",
+        "Usuario",
+        "Categoría",
+        "Monto",
+      ]],
+    },
+  });
+}
+
 async function actualizarTotales() {
   const respuesta = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: "gastos!A2:E",
+    range: "'gastos'!A2:E",
   });
 
   const gastos = respuesta.data.values ?? [];
@@ -117,9 +168,16 @@ async function actualizarTotales() {
   for (const fila of gastos) {
     const [fecha, , usuario, , monto] = fila;
 
-    if (!fecha || !usuario || !monto) continue;
+    if (!fecha || !usuario || monto === undefined) continue;
 
-    const valor = Number(monto);
+    const valor = Number(
+      String(monto)
+        .replace(/\./g, "")
+        .replace(",", ".")
+    );
+
+    if (!Number.isFinite(valor)) continue;
+
     const mes = String(fecha).slice(0, 7);
 
     const claves = [
@@ -130,30 +188,43 @@ async function actualizarTotales() {
     ];
 
     for (const clave of claves) {
-      totales.set(clave, (totales.get(clave) ?? 0) + valor);
+      totales.set(
+        clave,
+        (totales.get(clave) ?? 0) + valor
+      );
     }
   }
 
-  const filas = [["Tipo", "Período", "Usuario", "Total"]];
+  const filas: (string | number)[][] = [
+    ["Tipo", "Período", "Usuario", "Total"],
+  ];
 
   for (const [clave, total] of totales) {
     const [tipo, periodo, usuario] = clave.split("|");
-    filas.push([tipo, periodo, usuario, String(total)]);
+
+    filas.push([
+      tipo,
+      periodo,
+      usuario,
+      total,
+    ]);
   }
 
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SPREADSHEET_ID,
-    range: "totales!A:D",
+    range: "'totales'!A:D",
   });
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
-    range: "totales!A1",
+    range: "'totales'!A1",
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: filas,
     },
   });
+
+  console.log("✅ Totales actualizados");
 }
 
 bot.on("text", async (ctx) => {
@@ -173,17 +244,26 @@ bot.on("text", async (ctx) => {
 
   if (!Number.isFinite(monto) || monto <= 0) return;
 
-  const categoriaOriginal = partes.slice(0, -1).join(" ");
-  const categoria = normalizarCategoria(categoriaOriginal);
+  const categoriaOriginal =
+    partes.slice(0, -1).join(" ");
+
+  const categoria =
+    normalizarCategoria(categoriaOriginal);
 
   const usuario =
-    `${ctx.from.first_name}${ctx.from.last_name ? " " + ctx.from.last_name : ""}`;
+    `${ctx.from.first_name}${
+      ctx.from.last_name
+        ? " " + ctx.from.last_name
+        : ""
+    }`;
 
+  // PRIMERO: guardar el gasto
   try {
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: "gastos!A:E",
+      range: "'gastos'!A:E",
       valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
       requestBody: {
         values: [[
           fechaArgentina(),
@@ -194,18 +274,49 @@ bot.on("text", async (ctx) => {
         ]],
       },
     });
-
-    await actualizarTotales();
+  } catch (error) {
+    console.error(
+      "❌ Error guardando gasto:",
+      error
+    );
 
     await ctx.reply(
-      `✅ ${categoria} — $${monto.toLocaleString("es-AR")}`
+      "❌ No pude guardar el gasto."
     );
-  } catch (error) {
-    console.error(error);
-    await ctx.reply("❌ No pude registrar el gasto.");
+
+    return;
   }
+
+  // SEGUNDO: actualizar totales
+  try {
+    await actualizarTotales();
+  } catch (error) {
+    console.error(
+      "⚠️ El gasto se guardó, pero falló totales:",
+      error
+    );
+  }
+
+  // Si llegamos acá, EL GASTO SE GUARDÓ
+  await ctx.reply(
+    `✅ ${categoria} — $${monto.toLocaleString("es-AR")}`
+  );
 });
 
-bot.launch();
+async function iniciar() {
+  await asegurarEstructura();
+  await actualizarTotales();
 
-console.log("🤖 Esperancito está funcionando");
+  await bot.launch();
+
+  console.log(
+    "🤖 Esperancito está funcionando"
+  );
+}
+
+iniciar().catch((error) => {
+  console.error(
+    "❌ Error iniciando Esperancito:",
+    error
+  );
+});
