@@ -106,6 +106,16 @@ function horaArgentina() {
   });
 }
 
+function usuarioTelegram(ctx: any) {
+  return `${ctx.from.first_name}${
+    ctx.from.last_name ? " " + ctx.from.last_name : ""
+  }`;
+}
+
+function formatoPesos(valor: number) {
+  return `$${valor.toLocaleString("es-AR")}`;
+}
+
 async function asegurarPestaña(nombre: string) {
   const libro = await sheets.spreadsheets.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -156,13 +166,17 @@ async function asegurarEstructura() {
   });
 }
 
-async function actualizarResumen() {
+async function obtenerGastos() {
   const respuesta = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: "gastos!A2:E",
   });
 
-  const gastos = respuesta.data.values ?? [];
+  return respuesta.data.values ?? [];
+}
+
+async function actualizarResumen() {
+  const gastos = await obtenerGastos();
 
   const totales = new Map<string, number>();
 
@@ -224,9 +238,167 @@ async function actualizarResumen() {
       values: filas,
     },
   });
-
-  console.log("✅ Resumen actualizado");
 }
+
+bot.command("hoy", async (ctx) => {
+  const gastos = await obtenerGastos();
+  const hoy = fechaArgentina();
+
+  let totalFamiliar = 0;
+  const porUsuario = new Map<string, number>();
+
+  for (const fila of gastos) {
+    const [fecha, , usuario, , monto] = fila;
+
+    if (fecha !== hoy) continue;
+
+    const valor = convertirMonto(String(monto));
+
+    totalFamiliar += valor;
+    porUsuario.set(
+      usuario,
+      (porUsuario.get(usuario) ?? 0) + valor
+    );
+  }
+
+  let mensaje = `💰 Hoy: ${formatoPesos(totalFamiliar)}`;
+
+  for (const [usuario, total] of porUsuario) {
+    mensaje += `\n${usuario}: ${formatoPesos(total)}`;
+  }
+
+  await ctx.reply(mensaje);
+});
+
+bot.command("mes", async (ctx) => {
+  const gastos = await obtenerGastos();
+  const mesActual = fechaArgentina().slice(0, 7);
+
+  let totalFamiliar = 0;
+  const porUsuario = new Map<string, number>();
+
+  for (const fila of gastos) {
+    const [fecha, , usuario, , monto] = fila;
+
+    if (!String(fecha).startsWith(mesActual)) continue;
+
+    const valor = convertirMonto(String(monto));
+
+    totalFamiliar += valor;
+    porUsuario.set(
+      usuario,
+      (porUsuario.get(usuario) ?? 0) + valor
+    );
+  }
+
+  let mensaje = `📅 Mes actual: ${formatoPesos(totalFamiliar)}`;
+
+  for (const [usuario, total] of porUsuario) {
+    mensaje += `\n${usuario}: ${formatoPesos(total)}`;
+  }
+
+  await ctx.reply(mensaje);
+});
+
+bot.command("ultimo", async (ctx) => {
+  const gastos = await obtenerGastos();
+
+  if (gastos.length === 0) {
+    await ctx.reply("No hay gastos registrados.");
+    return;
+  }
+
+  const ultimo = gastos[gastos.length - 1];
+  const [fecha, hora, usuario, categoria, monto] = ultimo;
+
+  await ctx.reply(
+    `🧾 Último gasto\n` +
+    `${categoria} — ${formatoPesos(convertirMonto(String(monto)))}\n` +
+    `${usuario}\n` +
+    `${fecha} ${hora}`
+  );
+});
+
+bot.command("deshacer", async (ctx) => {
+  const gastos = await obtenerGastos();
+  const usuario = usuarioTelegram(ctx);
+
+  let indice = -1;
+
+  for (let i = gastos.length - 1; i >= 0; i--) {
+    if (gastos[i][2] === usuario) {
+      indice = i;
+      break;
+    }
+  }
+
+  if (indice === -1) {
+    await ctx.reply("No encontré gastos tuyos para borrar.");
+    return;
+  }
+
+  const fila = gastos[indice];
+  const numeroFilaSheets = indice + 2;
+
+  const metadata = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+  });
+
+  const hojaGastos = metadata.data.sheets?.find(
+    hoja => hoja.properties?.title === "gastos"
+  );
+
+  const sheetId = hojaGastos?.properties?.sheetId;
+
+  if (sheetId === undefined) {
+    await ctx.reply("No pude encontrar la hoja de gastos.");
+    return;
+  }
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          deleteDimension: {
+            range: {
+              sheetId,
+              dimension: "ROWS",
+              startIndex: numeroFilaSheets - 1,
+              endIndex: numeroFilaSheets,
+            },
+          },
+        },
+      ],
+    },
+  });
+
+  await actualizarResumen();
+
+  const [, , , categoria, monto] = fila;
+
+  await ctx.reply(
+    `🗑️ Eliminado: ${categoria} — ${formatoPesos(
+      convertirMonto(String(monto))
+    )}`
+  );
+});
+
+bot.command("ayuda", async (ctx) => {
+  await ctx.reply(
+    `🤖 Esperancito\n\n` +
+    `Para registrar un gasto:\n` +
+    `Supermercado $25000\n` +
+    `Tarjetas $150000\n` +
+    `Nafta $50000\n\n` +
+    `Comandos:\n` +
+    `/hoy — gastos de hoy\n` +
+    `/mes — gastos del mes\n` +
+    `/ultimo — último gasto registrado\n` +
+    `/deshacer — elimina tu último gasto\n` +
+    `/ayuda — muestra esta ayuda`
+  );
+});
 
 bot.on("text", async (ctx) => {
   const texto = ctx.message.text.trim();
@@ -251,12 +423,7 @@ bot.on("text", async (ctx) => {
   const categoria =
     normalizarCategoria(categoriaOriginal);
 
-  const usuario =
-    `${ctx.from.first_name}${
-      ctx.from.last_name
-        ? " " + ctx.from.last_name
-        : ""
-    }`;
+  const usuario = usuarioTelegram(ctx);
 
   try {
     await sheets.spreadsheets.values.append({
@@ -277,10 +444,7 @@ bot.on("text", async (ctx) => {
   } catch (error) {
     console.error("❌ Error guardando gasto:", error);
 
-    await ctx.reply(
-      "❌ No pude guardar el gasto."
-    );
-
+    await ctx.reply("❌ No pude guardar el gasto.");
     return;
   }
 
@@ -294,21 +458,21 @@ bot.on("text", async (ctx) => {
   }
 
   await ctx.reply(
-    `✅ ${categoria} — $${monto.toLocaleString("es-AR")}`
+    `✅ ${categoria} — ${formatoPesos(monto)}`
   );
 });
 
 async function iniciar() {
   await asegurarEstructura();
+  await actualizarResumen();
 
-  try {
-    await actualizarResumen();
-  } catch (error) {
-    console.error(
-      "⚠️ No pude actualizar el resumen al iniciar:",
-      error
-    );
-  }
+  await bot.telegram.setMyCommands([
+    { command: "hoy", description: "Ver gastos de hoy" },
+    { command: "mes", description: "Ver gastos del mes" },
+    { command: "ultimo", description: "Ver último gasto" },
+    { command: "deshacer", description: "Borrar tu último gasto" },
+    { command: "ayuda", description: "Ver ayuda" },
+  ]);
 
   await bot.launch();
 
@@ -316,8 +480,5 @@ async function iniciar() {
 }
 
 iniciar().catch((error) => {
-  console.error(
-    "❌ Error iniciando Esperancito:",
-    error
-  );
+  console.error("❌ Error iniciando Esperancito:", error);
 });
