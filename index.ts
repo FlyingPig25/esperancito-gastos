@@ -1,5 +1,6 @@
 import { Telegraf } from "telegraf";
 import { google } from "googleapis";
+import http from "http";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID!;
@@ -566,6 +567,19 @@ async function iniciar() {
     "🤖 Esperancito está funcionando"
   );
 }
+const PORT = Number(process.env.PORT || 3000);
+
+http
+  .createServer((req, res) => {
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+
+    res.end("Esperancito está vivo 🤖");
+  })
+  .listen(PORT, "0.0.0.0", () => {
+    console.log(`🌐 Servidor HTTP activo en puerto ${PORT}`);
+  });
 
 iniciar().catch((error) => {
   console.error(
