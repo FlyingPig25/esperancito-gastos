@@ -198,13 +198,8 @@ function normalizarHora(valor: any) {
   ).padStart(2, "0")}`;
 }
 
-function sumarMeses(
-  mes: string,
-  cantidad: number
-) {
-  const [anio, numeroMes] = mes
-    .split("-")
-    .map(Number);
+function sumarMeses(mes: string, cantidad: number) {
+  const [anio, numeroMes] = mes.split("-").map(Number);
 
   const fecha = new Date(
     Date.UTC(anio, numeroMes - 1 + cantidad, 1)
@@ -216,9 +211,7 @@ function sumarMeses(
 }
 
 function nombreMes(mes: string) {
-  const [anio, numeroMes] = mes
-    .split("-")
-    .map(Number);
+  const [anio, numeroMes] = mes.split("-").map(Number);
 
   return new Date(
     Date.UTC(anio, numeroMes - 1, 1)
@@ -233,14 +226,18 @@ function claveSesion(ctx: any) {
   return `${ctx.chat.id}:${ctx.from.id}`;
 }
 
+function normalizarMedioPago(texto: string) {
+  return texto
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
 // ======================================================
 // PESTAÑAS
 // ======================================================
 
-const estructuras: Record<
-  string,
-  string[]
-> = {
+const estructuras: Record<string, string[]> = {
   gastos: [
     "Fecha",
     "Hora",
@@ -268,12 +265,18 @@ const estructuras: Record<
     "Presupuesto",
   ],
 
-  proyeccion: [
-    "Mes",
+  cuotas_datos: [
+    "Fecha de carga",
+    "Usuario",
     "Medio de pago",
     "Concepto",
+    "Mes",
     "Cuota",
     "Monto",
+  ],
+
+  proyeccion: [
+    "Usuario / Tarjeta",
   ],
 };
 
@@ -304,19 +307,19 @@ async function asegurarPestañas() {
         },
       });
 
-      console.log(
-        `✅ Pestaña ${nombre} creada`
-      );
+      console.log(`✅ Pestaña ${nombre} creada`);
     }
 
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${nombre}!A1`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [estructuras[nombre]],
-      },
-    });
+    if (nombre !== "proyeccion") {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${nombre}!A1`,
+        valueInputOption: "USER_ENTERED",
+        requestBody: {
+          values: [estructuras[nombre]],
+        },
+      });
+    }
   }
 }
 
@@ -333,7 +336,6 @@ async function obtenerFilas(
 
   return respuesta.data.values ?? [];
 }
-
 // ======================================================
 // RESUMEN
 // ======================================================
@@ -456,7 +458,7 @@ function cancelarSesion(ctx: any) {
 }
 
 // ======================================================
-// COMANDOS EXISTENTES
+// HOY
 // ======================================================
 
 bot.command("hoy", async ctx => {
@@ -466,6 +468,7 @@ bot.command("hoy", async ctx => {
   const hoy = fechaArgentina();
 
   let familiar = 0;
+
   const usuarios =
     new Map<string, number>();
 
@@ -480,11 +483,14 @@ bot.command("hoy", async ctx => {
 
     if (
       normalizarFecha(fechaRaw) !== hoy
-    )
+    ) {
       continue;
+    }
 
     const monto =
       numeroDesdeSheet(montoRaw);
+
+    if (!Number.isFinite(monto)) continue;
 
     familiar += monto;
 
@@ -501,13 +507,18 @@ bot.command("hoy", async ctx => {
     )}`;
 
   for (const [usuario, total] of usuarios) {
-    mensaje += `\n${usuario}: ${formatoPesos(
-      total
-    )}`;
+    mensaje +=
+      `\n${usuario}: ${formatoPesos(
+        total
+      )}`;
   }
 
   await ctx.reply(mensaje);
 });
+
+// ======================================================
+// MES
+// ======================================================
 
 bot.command("mes", async ctx => {
   cancelarSesion(ctx);
@@ -516,6 +527,7 @@ bot.command("mes", async ctx => {
   const mes = mesActual();
 
   let familiar = 0;
+
   const usuarios =
     new Map<string, number>();
 
@@ -531,11 +543,14 @@ bot.command("mes", async ctx => {
     const fecha =
       normalizarFecha(fechaRaw);
 
-    if (!fecha.startsWith(mes))
+    if (!fecha.startsWith(mes)) {
       continue;
+    }
 
     const monto =
       numeroDesdeSheet(montoRaw);
+
+    if (!Number.isFinite(monto)) continue;
 
     familiar += monto;
 
@@ -553,13 +568,18 @@ bot.command("mes", async ctx => {
     )}`;
 
   for (const [usuario, total] of usuarios) {
-    mensaje += `\n${usuario}: ${formatoPesos(
-      total
-    )}`;
+    mensaje +=
+      `\n${usuario}: ${formatoPesos(
+        total
+      )}`;
   }
 
   await ctx.reply(mensaje);
 });
+
+// ======================================================
+// ÚLTIMO
+// ======================================================
 
 bot.command("ultimo", async ctx => {
   cancelarSesion(ctx);
@@ -573,7 +593,8 @@ bot.command("ultimo", async ctx => {
     return;
   }
 
-  const fila = gastos[gastos.length - 1];
+  const fila =
+    gastos[gastos.length - 1];
 
   const [
     fechaRaw,
@@ -595,11 +616,17 @@ bot.command("ultimo", async ctx => {
   );
 });
 
+// ======================================================
+// DESHACER
+// ======================================================
+
 bot.command("deshacer", async ctx => {
   cancelarSesion(ctx);
 
   const gastos = await obtenerGastos();
-  const usuario = usuarioTelegram(ctx);
+
+  const usuario =
+    usuarioTelegram(ctx);
 
   let indice = -1;
 
@@ -638,7 +665,12 @@ bot.command("deshacer", async ctx => {
   const sheetId =
     hoja?.properties?.sheetId;
 
-  if (sheetId === undefined) return;
+  if (sheetId === undefined) {
+    await ctx.reply(
+      "No pude encontrar la pestaña gastos."
+    );
+    return;
+  }
 
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
@@ -674,6 +706,8 @@ bot.command("deshacer", async ctx => {
 // ======================================================
 
 bot.command("ingreso", async ctx => {
+  cancelarSesion(ctx);
+
   sesiones.set(claveSesion(ctx), {
     tipo: "ingreso",
     paso: "persona",
@@ -689,24 +723,32 @@ bot.command("balance", async ctx => {
 
   const mes = mesActual();
 
-  const ingresos = await obtenerFilas(
-    "ingresos",
-    "A2:C"
-  );
+  const ingresos =
+    await obtenerFilas(
+      "ingresos",
+      "A2:C"
+    );
 
-  const gastos = await obtenerGastos();
+  const gastos =
+    await obtenerGastos();
 
   let totalIngresos = 0;
+
   const ingresoPersona =
     new Map<string, number>();
 
   for (const fila of ingresos) {
-    if (String(fila[0]) !== mes)
+    if (String(fila[0]) !== mes) {
       continue;
+    }
 
-    const persona = String(fila[1]);
+    const persona =
+      String(fila[1]);
+
     const monto =
       numeroDesdeSheet(fila[2]);
+
+    if (!Number.isFinite(monto)) continue;
 
     totalIngresos += monto;
 
@@ -723,11 +765,16 @@ bot.command("balance", async ctx => {
     const fecha =
       normalizarFecha(fila[0]);
 
-    if (!fecha.startsWith(mes))
+    if (!fecha.startsWith(mes)) {
       continue;
+    }
 
-    totalGastos +=
+    const monto =
       numeroDesdeSheet(fila[4]);
+
+    if (!Number.isFinite(monto)) continue;
+
+    totalGastos += monto;
   }
 
   const saldo =
@@ -739,10 +786,14 @@ bot.command("balance", async ctx => {
       totalIngresos
     )}`;
 
-  for (const [persona, total] of ingresoPersona) {
-    mensaje += `\n• ${persona}: ${formatoPesos(
-      total
-    )}`;
+  for (
+    const [persona, total]
+    of ingresoPersona
+  ) {
+    mensaje +=
+      `\n• ${persona}: ${formatoPesos(
+        total
+      )}`;
   }
 
   mensaje +=
@@ -761,6 +812,8 @@ bot.command("balance", async ctx => {
 // ======================================================
 
 bot.command("presupuesto", async ctx => {
+  cancelarSesion(ctx);
+
   sesiones.set(claveSesion(ctx), {
     tipo: "presupuesto",
     paso: "categoria",
@@ -771,91 +824,110 @@ bot.command("presupuesto", async ctx => {
   );
 });
 
-bot.command("presupuestos", async ctx => {
-  cancelarSesion(ctx);
+bot.command(
+  "presupuestos",
+  async ctx => {
+    cancelarSesion(ctx);
 
-  const mes = mesActual();
+    const mes = mesActual();
 
-  const presupuestos =
-    await obtenerFilas(
-      "presupuestos",
-      "A2:C"
-    );
+    const presupuestos =
+      await obtenerFilas(
+        "presupuestos",
+        "A2:C"
+      );
 
-  const gastos =
-    await obtenerGastos();
+    const gastos =
+      await obtenerGastos();
 
-  const gastado =
-    new Map<string, number>();
+    const gastado =
+      new Map<string, number>();
 
-  for (const fila of gastos) {
-    const fecha =
-      normalizarFecha(fila[0]);
+    for (const fila of gastos) {
+      const fecha =
+        normalizarFecha(fila[0]);
 
-    if (!fecha.startsWith(mes))
-      continue;
+      if (!fecha.startsWith(mes)) {
+        continue;
+      }
 
-    const categoria =
-      String(fila[3]);
+      const categoria =
+        String(fila[3]);
 
-    gastado.set(
-      categoria,
-      (gastado.get(categoria) ?? 0) +
-        numeroDesdeSheet(fila[4])
-    );
-  }
+      const monto =
+        numeroDesdeSheet(fila[4]);
 
-  const actuales =
-    presupuestos.filter(
-      fila => String(fila[0]) === mes
-    );
+      if (!Number.isFinite(monto)) {
+        continue;
+      }
 
-  if (!actuales.length) {
-    await ctx.reply(
-      "Todavía no hay presupuestos cargados para este mes."
-    );
-    return;
-  }
+      gastado.set(
+        categoria,
+        (gastado.get(categoria) ?? 0) +
+          monto
+      );
+    }
 
-  let mensaje =
-    `📊 Presupuestos — ${nombreMes(
-      mes
-    )}\n`;
+    const actuales =
+      presupuestos.filter(
+        fila =>
+          String(fila[0]) === mes
+      );
 
-  for (const fila of actuales) {
-    const categoria =
-      String(fila[1]);
+    if (!actuales.length) {
+      await ctx.reply(
+        "Todavía no hay presupuestos cargados para este mes."
+      );
+      return;
+    }
 
-    const limite =
-      numeroDesdeSheet(fila[2]);
+    let mensaje =
+      `📊 Presupuestos — ${nombreMes(
+        mes
+      )}\n`;
 
-    const usado =
-      gastado.get(categoria) ?? 0;
+    for (const fila of actuales) {
+      const categoria =
+        String(fila[1]);
 
-    const porcentaje =
-      limite > 0
-        ? Math.round(
-            (usado / limite) * 100
-          )
-        : 0;
+      const limite =
+        numeroDesdeSheet(fila[2]);
 
-    mensaje +=
-      `\n${categoria}\n` +
-      `${formatoPesos(
-        usado
-      )} / ${formatoPesos(
-        limite
-      )} — ${porcentaje}%`;
-  }
+      const usado =
+        gastado.get(categoria) ?? 0;
 
-  await ctx.reply(mensaje);
-});
+      const porcentaje =
+        limite > 0
+          ? Math.round(
+              (usado / limite) * 100
+            )
+          : 0;
 
-// ======================================================
-// CUOTAS
+      let alerta = "";
+
+      if (porcentaje >= 100) {
+        alerta = " 🔴";
+      } else if (porcentaje >= 80) {
+        alerta = " ⚠️";
+      }
+
+      mensaje +=
+        `\n${categoria}\n` +
+        `${formatoPesos(
+          usado
+        )} / ${formatoPesos(
+          limite
+        )} — ${porcentaje}%${alerta}`;
+    }
+
+    await ctx.reply(mensaje);
+    // ======================================================
+// CUOTAS + PROYECCIÓN HORIZONTAL
 // ======================================================
 
 bot.command("cuotas", async ctx => {
+  cancelarSesion(ctx);
+
   sesiones.set(claveSesion(ctx), {
     tipo: "cuotas",
     paso: "monto",
@@ -866,6 +938,258 @@ bot.command("cuotas", async ctx => {
   );
 });
 
+async function obtenerCuotasDatos() {
+  return obtenerFilas(
+    "cuotas_datos",
+    "A2:G"
+  );
+}
+
+async function reconstruirProyeccionHorizontal() {
+  const cuotas =
+    await obtenerCuotasDatos();
+
+  const meses: string[] = [];
+
+  // Mostramos desde el mes siguiente y 12 meses hacia adelante
+  for (let i = 1; i <= 12; i++) {
+    meses.push(
+      sumarMeses(mesActual(), i)
+    );
+  }
+
+  // usuario|medioPago => nombre visible + montos por mes
+  const agrupado = new Map<
+    string,
+    {
+      usuario: string;
+      medio: string;
+      montos: Map<string, number>;
+    }
+  >();
+
+  const detalleCompras = new Map<
+    string,
+    {
+      usuario: string;
+      medio: string;
+      concepto: string;
+      montos: Map<string, number>;
+    }
+  >();
+
+  for (const fila of cuotas) {
+    const [
+      ,
+      usuarioRaw,
+      medioRaw,
+      conceptoRaw,
+      mesRaw,
+      ,
+      montoRaw,
+    ] = fila;
+
+    const usuario =
+      String(usuarioRaw ?? "").trim();
+
+    const medioVisible =
+      String(medioRaw ?? "").trim();
+
+    const concepto =
+      String(conceptoRaw ?? "").trim();
+
+    const mes =
+      String(mesRaw ?? "").trim();
+
+    const monto =
+      numeroDesdeSheet(montoRaw);
+
+    if (
+      !usuario ||
+      !medioVisible ||
+      !mes ||
+      !Number.isFinite(monto)
+    ) {
+      continue;
+    }
+
+    // Solo mostramos los 12 meses de la vista
+    if (!meses.includes(mes)) {
+      continue;
+    }
+
+    const medioNormalizado =
+      normalizarMedioPago(medioVisible);
+
+    const claveAgrupada =
+      `${usuario}|${medioNormalizado}`;
+
+    if (!agrupado.has(claveAgrupada)) {
+      agrupado.set(claveAgrupada, {
+        usuario,
+        medio: medioVisible,
+        montos: new Map<string, number>(),
+      });
+    }
+
+    const grupo =
+      agrupado.get(claveAgrupada)!;
+
+    grupo.montos.set(
+      mes,
+      (grupo.montos.get(mes) ?? 0) +
+        monto
+    );
+
+    const claveDetalle =
+      `${usuario}|${medioNormalizado}|${concepto}`;
+
+    if (!detalleCompras.has(claveDetalle)) {
+      detalleCompras.set(claveDetalle, {
+        usuario,
+        medio: medioVisible,
+        concepto,
+        montos: new Map<string, number>(),
+      });
+    }
+
+    const detalle =
+      detalleCompras.get(claveDetalle)!;
+
+    detalle.montos.set(
+      mes,
+      (detalle.montos.get(mes) ?? 0) +
+        monto
+    );
+  }
+
+  const encabezadoResumen = [
+    "Usuario / Tarjeta",
+    ...meses.map(nombreMes),
+  ];
+
+  const filasResumen: any[][] = [
+    encabezadoResumen,
+  ];
+
+  const gruposOrdenados = [
+    ...agrupado.values(),
+  ].sort((a, b) => {
+    const usuarioCompare =
+      a.usuario.localeCompare(
+        b.usuario,
+        "es"
+      );
+
+    if (usuarioCompare !== 0) {
+      return usuarioCompare;
+    }
+
+    return a.medio.localeCompare(
+      b.medio,
+      "es"
+    );
+  });
+
+  for (const grupo of gruposOrdenados) {
+    filasResumen.push([
+      `${grupo.usuario} — ${grupo.medio}`,
+      ...meses.map(
+        mes => grupo.montos.get(mes) ?? 0
+      ),
+    ]);
+  }
+
+  // TOTAL FAMILIAR
+  const totalFamiliarPorMes =
+    new Map<string, number>();
+
+  for (const grupo of agrupado.values()) {
+    for (const mes of meses) {
+      totalFamiliarPorMes.set(
+        mes,
+        (totalFamiliarPorMes.get(mes) ?? 0) +
+          (grupo.montos.get(mes) ?? 0)
+      );
+    }
+  }
+
+  filasResumen.push([
+    "TOTAL FAMILIAR",
+    ...meses.map(
+      mes =>
+        totalFamiliarPorMes.get(mes) ?? 0
+    ),
+  ]);
+
+  // Separador + detalle de compras
+  filasResumen.push([]);
+  filasResumen.push([
+    "DETALLE DE COMPRAS",
+    ...meses.map(nombreMes),
+  ]);
+
+  const detallesOrdenados = [
+    ...detalleCompras.values(),
+  ].sort((a, b) => {
+    const usuarioCompare =
+      a.usuario.localeCompare(
+        b.usuario,
+        "es"
+      );
+
+    if (usuarioCompare !== 0) {
+      return usuarioCompare;
+    }
+
+    const medioCompare =
+      a.medio.localeCompare(
+        b.medio,
+        "es"
+      );
+
+    if (medioCompare !== 0) {
+      return medioCompare;
+    }
+
+    return a.concepto.localeCompare(
+      b.concepto,
+      "es"
+    );
+  });
+
+  for (
+    const detalle
+    of detallesOrdenados
+  ) {
+    filasResumen.push([
+      `${detalle.usuario} — ${detalle.medio} — ${detalle.concepto}`,
+      ...meses.map(
+        mes =>
+          detalle.montos.get(mes) ?? 0
+      ),
+    ]);
+  }
+
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "proyeccion!A:Z",
+  });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "proyeccion!A1",
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: filasResumen,
+    },
+  });
+
+  console.log(
+    "✅ Proyección horizontal actualizada"
+  );
+}
+
 async function guardarCuotas(
   ctx: any,
   sesion: Extract<
@@ -874,10 +1198,23 @@ async function guardarCuotas(
   >,
   demora: number
 ) {
-  const total = sesion.monto!;
-  const cantidad = sesion.cantidad!;
-  const medio = sesion.medio!;
-  const concepto = sesion.concepto!;
+  const total =
+    sesion.monto!;
+
+  const cantidad =
+    sesion.cantidad!;
+
+  const medio =
+    sesion.medio!;
+
+  const concepto =
+    sesion.concepto!;
+
+  const usuario =
+    usuarioTelegram(ctx);
+
+  const fechaCarga =
+    fechaArgentina();
 
   const totalCentavos =
     Math.round(total * 100);
@@ -892,7 +1229,10 @@ async function guardarCuotas(
     base * cantidad;
 
   const primera =
-    sumarMeses(mesActual(), demora);
+    sumarMeses(
+      mesActual(),
+      demora
+    );
 
   const filas: any[][] = [];
 
@@ -909,9 +1249,11 @@ async function guardarCuotas(
     }
 
     filas.push([
-      sumarMeses(primera, i),
+      fechaCarga,
+      usuario,
       medio,
       concepto,
+      sumarMeses(primera, i),
       `${i + 1}/${cantidad}`,
       centavos / 100,
     ]);
@@ -919,7 +1261,7 @@ async function guardarCuotas(
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: "proyeccion!A:E",
+    range: "cuotas_datos!A:G",
     valueInputOption: "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
     requestBody: {
@@ -927,13 +1269,17 @@ async function guardarCuotas(
     },
   });
 
+  await reconstruirProyeccionHorizontal();
+
   const ultima =
     sumarMeses(
       primera,
       cantidad - 1
     );
 
-  sesiones.delete(claveSesion(ctx));
+  sesiones.delete(
+    claveSesion(ctx)
+  );
 
   await ctx.reply(
     `✅ Compra proyectada\n\n` +
@@ -941,11 +1287,14 @@ async function guardarCuotas(
         total
       )}\n` +
       `💳 ${medio}\n` +
+      `👤 ${usuario}\n` +
       `${cantidad} cuotas\n` +
       `Primera: ${nombreMes(
         primera
       )}\n` +
-      `Última: ${nombreMes(ultima)}`
+      `Última: ${nombreMes(
+        ultima
+      )}`
   );
 }
 
@@ -953,7 +1302,9 @@ bot.action(
   "cuotas_mes_1",
   async ctx => {
     const sesion =
-      sesiones.get(claveSesion(ctx));
+      sesiones.get(
+        claveSesion(ctx)
+      );
 
     if (
       !sesion ||
@@ -962,6 +1313,7 @@ bot.action(
       await ctx.answerCbQuery(
         "La carga ya no está activa."
       );
+
       return;
     }
 
@@ -979,7 +1331,9 @@ bot.action(
   "cuotas_mes_2",
   async ctx => {
     const sesion =
-      sesiones.get(claveSesion(ctx));
+      sesiones.get(
+        claveSesion(ctx)
+      );
 
     if (
       !sesion ||
@@ -988,6 +1342,7 @@ bot.action(
       await ctx.answerCbQuery(
         "La carga ya no está activa."
       );
+
       return;
     }
 
@@ -1002,7 +1357,7 @@ bot.action(
 );
 
 // ======================================================
-// PROYECCIÓN
+// PROYECCIÓN EN TELEGRAM
 // ======================================================
 
 bot.command(
@@ -1010,13 +1365,13 @@ bot.command(
   async ctx => {
     cancelarSesion(ctx);
 
-    const filas =
-      await obtenerFilas(
-        "proyeccion",
-        "A2:E"
-      );
+    await reconstruirProyeccionHorizontal();
 
-    const desde = mesActual();
+    const filas =
+      await obtenerCuotasDatos();
+
+    const desde =
+      mesActual();
 
     const meses =
       new Map<
@@ -1025,13 +1380,30 @@ bot.command(
       >();
 
     for (const fila of filas) {
-      const mes = String(fila[0]);
+      const usuario =
+        String(fila[1] ?? "").trim();
 
-      if (mes < desde) continue;
+      const medio =
+        String(fila[2] ?? "").trim();
 
-      const medio = String(fila[1]);
+      const mes =
+        String(fila[4] ?? "").trim();
+
       const monto =
-        numeroDesdeSheet(fila[4]);
+        numeroDesdeSheet(fila[6]);
+
+      if (
+        !usuario ||
+        !medio ||
+        !mes ||
+        !Number.isFinite(monto)
+      ) {
+        continue;
+      }
+
+      if (mes <= desde) {
+        continue;
+      }
 
       if (!meses.has(mes)) {
         meses.set(
@@ -1040,11 +1412,15 @@ bot.command(
         );
       }
 
-      const medios = meses.get(mes)!;
+      const medios =
+        meses.get(mes)!;
+
+      const clave =
+        `${usuario} — ${medio}`;
 
       medios.set(
-        medio,
-        (medios.get(medio) ?? 0) +
+        clave,
+        (medios.get(clave) ?? 0) +
           monto
       );
     }
@@ -1061,37 +1437,44 @@ bot.command(
       await ctx.reply(
         "No hay pagos proyectados."
       );
+
       return;
     }
 
     let mensaje =
       "📆 Próximos pagos\n";
 
-    for (const [mes, medios] of ordenados) {
+    for (
+      const [mes, medios]
+      of ordenados
+    ) {
       let total = 0;
 
-      mensaje += `\n📅 ${nombreMes(
-        mes
-      )}`;
+      mensaje +=
+        `\n📅 ${nombreMes(
+          mes
+        )}`;
 
-      for (const [medio, monto] of medios) {
+      for (
+        const [medio, monto]
+        of medios
+      ) {
         total += monto;
 
-        mensaje += `\n• ${medio}: ${formatoPesos(
-          monto
-        )}`;
+        mensaje +=
+          `\n• ${medio}: ${formatoPesos(
+            monto
+          )}`;
       }
 
-      mensaje += `\nTotal: ${formatoPesos(
-        total
-      )}\n`;
+      mensaje +=
+        `\nTotal familiar: ${formatoPesos(
+          total
+        )}\n`;
     }
 
     await ctx.reply(mensaje);
-  }
-);
-
-// ======================================================
+  }// ======================================================
 // CANCELAR
 // ======================================================
 
@@ -1111,21 +1494,39 @@ async function procesarSesion(
   ctx: any,
   texto: string
 ) {
-  const clave = claveSesion(ctx);
-  const sesion = sesiones.get(clave);
+  const clave =
+    claveSesion(ctx);
 
-  if (!sesion) return false;
+  const sesion =
+    sesiones.get(clave);
 
+  if (!sesion) {
+    return false;
+  }
+
+  // --------------------------
   // INGRESO
-  if (sesion.tipo === "ingreso") {
-    if (sesion.paso === "persona") {
-      sesion.persona = texto;
-      sesion.paso = "monto";
+  // --------------------------
 
-      sesiones.set(clave, sesion);
+  if (
+    sesion.tipo === "ingreso"
+  ) {
+    if (
+      sesion.paso === "persona"
+    ) {
+      sesion.persona =
+        texto.trim();
+
+      sesion.paso =
+        "monto";
+
+      sesiones.set(
+        clave,
+        sesion
+      );
 
       await ctx.reply(
-        `¿Cuánto ingresó ${texto}?`
+        `¿Cuánto ingresó ${sesion.persona}?`
       );
 
       return true;
@@ -1146,10 +1547,18 @@ async function procesarSesion(
     }
 
     await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: "ingresos!A:C",
-      valueInputOption: "USER_ENTERED",
-      insertDataOption: "INSERT_ROWS",
+      spreadsheetId:
+        SPREADSHEET_ID,
+
+      range:
+        "ingresos!A:C",
+
+      valueInputOption:
+        "USER_ENTERED",
+
+      insertDataOption:
+        "INSERT_ROWS",
+
       requestBody: {
         values: [[
           mesActual(),
@@ -1162,7 +1571,8 @@ async function procesarSesion(
     sesiones.delete(clave);
 
     await ctx.reply(
-      `✅ Ingreso registrado\n${sesion.persona}: ${formatoPesos(
+      `✅ Ingreso registrado\n` +
+      `${sesion.persona}: ${formatoPesos(
         monto
       )}`
     );
@@ -1170,19 +1580,30 @@ async function procesarSesion(
     return true;
   }
 
+  // --------------------------
   // PRESUPUESTO
+  // --------------------------
+
   if (
-    sesion.tipo === "presupuesto"
+    sesion.tipo ===
+    "presupuesto"
   ) {
     if (
-      sesion.paso === "categoria"
+      sesion.paso ===
+      "categoria"
     ) {
       sesion.categoria =
-        normalizarCategoria(texto);
+        normalizarCategoria(
+          texto
+        );
 
-      sesion.paso = "monto";
+      sesion.paso =
+        "monto";
 
-      sesiones.set(clave, sesion);
+      sesiones.set(
+        clave,
+        sesion
+      );
 
       await ctx.reply(
         `¿Cuál es el presupuesto mensual para ${sesion.categoria}?`
@@ -1220,24 +1641,40 @@ async function procesarSesion(
             sesion.categoria
       );
 
-    if (filaExistente >= 0) {
+    if (
+      filaExistente >= 0
+    ) {
       const numeroFila =
         filaExistente + 2;
 
       await sheets.spreadsheets.values.update({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `presupuestos!C${numeroFila}`,
-        valueInputOption: "USER_ENTERED",
+        spreadsheetId:
+          SPREADSHEET_ID,
+
+        range:
+          `presupuestos!C${numeroFila}`,
+
+        valueInputOption:
+          "USER_ENTERED",
+
         requestBody: {
           values: [[monto]],
         },
       });
     } else {
       await sheets.spreadsheets.values.append({
-        spreadsheetId: SPREADSHEET_ID,
-        range: "presupuestos!A:C",
-        valueInputOption: "USER_ENTERED",
-        insertDataOption: "INSERT_ROWS",
+        spreadsheetId:
+          SPREADSHEET_ID,
+
+        range:
+          "presupuestos!A:C",
+
+        valueInputOption:
+          "USER_ENTERED",
+
+        insertDataOption:
+          "INSERT_ROWS",
+
         requestBody: {
           values: [[
             mesActual(),
@@ -1251,7 +1688,8 @@ async function procesarSesion(
     sesiones.delete(clave);
 
     await ctx.reply(
-      `✅ Presupuesto establecido\n${sesion.categoria}: ${formatoPesos(
+      `✅ Presupuesto establecido\n` +
+      `${sesion.categoria}: ${formatoPesos(
         monto
       )}`
     );
@@ -1259,9 +1697,16 @@ async function procesarSesion(
     return true;
   }
 
+  // --------------------------
   // CUOTAS
-  if (sesion.tipo === "cuotas") {
-    if (sesion.paso === "monto") {
+  // --------------------------
+
+  if (
+    sesion.tipo === "cuotas"
+  ) {
+    if (
+      sesion.paso === "monto"
+    ) {
       const monto =
         convertirMonto(texto);
 
@@ -1276,10 +1721,16 @@ async function procesarSesion(
         return true;
       }
 
-      sesion.monto = monto;
-      sesion.paso = "cantidad";
+      sesion.monto =
+        monto;
 
-      sesiones.set(clave, sesion);
+      sesion.paso =
+        "cantidad";
+
+      sesiones.set(
+        clave,
+        sesion
+      );
 
       await ctx.reply(
         "¿En cuántas cuotas?"
@@ -1289,13 +1740,16 @@ async function procesarSesion(
     }
 
     if (
-      sesion.paso === "cantidad"
+      sesion.paso ===
+      "cantidad"
     ) {
       const cantidad =
         Number(texto);
 
       if (
-        !Number.isInteger(cantidad) ||
+        !Number.isInteger(
+          cantidad
+        ) ||
         cantidad <= 0 ||
         cantidad > 60
       ) {
@@ -1306,10 +1760,16 @@ async function procesarSesion(
         return true;
       }
 
-      sesion.cantidad = cantidad;
-      sesion.paso = "medio";
+      sesion.cantidad =
+        cantidad;
 
-      sesiones.set(clave, sesion);
+      sesion.paso =
+        "medio";
+
+      sesiones.set(
+        clave,
+        sesion
+      );
 
       await ctx.reply(
         "¿Con qué tarjeta o medio de pago?"
@@ -1318,11 +1778,19 @@ async function procesarSesion(
       return true;
     }
 
-    if (sesion.paso === "medio") {
-      sesion.medio = texto;
-      sesion.paso = "concepto";
+    if (
+      sesion.paso === "medio"
+    ) {
+      sesion.medio =
+        texto.trim();
 
-      sesiones.set(clave, sesion);
+      sesion.paso =
+        "concepto";
+
+      sesiones.set(
+        clave,
+        sesion
+      );
 
       await ctx.reply(
         "¿Cuál es el concepto de la compra?"
@@ -1332,12 +1800,19 @@ async function procesarSesion(
     }
 
     if (
-      sesion.paso === "concepto"
+      sesion.paso ===
+      "concepto"
     ) {
-      sesion.concepto = texto;
-      sesion.paso = "primerMes";
+      sesion.concepto =
+        texto.trim();
 
-      sesiones.set(clave, sesion);
+      sesion.paso =
+        "primerMes";
+
+      sesiones.set(
+        clave,
+        sesion
+      );
 
       const siguiente =
         sumarMeses(
@@ -1356,13 +1831,17 @@ async function procesarSesion(
         Markup.inlineKeyboard([
           [
             Markup.button.callback(
-              nombreMes(siguiente),
+              nombreMes(
+                siguiente
+              ),
               "cuotas_mes_1"
             ),
           ],
           [
             Markup.button.callback(
-              nombreMes(dosMeses),
+              nombreMes(
+                dosMeses
+              ),
               "cuotas_mes_2"
             ),
           ],
@@ -1380,135 +1859,208 @@ async function procesarSesion(
 // GASTOS NORMALES
 // ======================================================
 
-bot.on("text", async ctx => {
-  const texto =
-    ctx.message.text.trim();
+bot.on(
+  "text",
+  async ctx => {
+    const texto =
+      ctx.message.text.trim();
 
-  if (texto.startsWith("/")) return;
+    if (
+      texto.startsWith("/")
+    ) {
+      return;
+    }
 
-  if (
-    await procesarSesion(ctx, texto)
-  )
-    return;
+    if (
+      await procesarSesion(
+        ctx,
+        texto
+      )
+    ) {
+      return;
+    }
 
-  const partes =
-    texto.split(/\s+/);
+    const partes =
+      texto.split(/\s+/);
 
-  if (partes.length < 2) return;
+    if (
+      partes.length < 2
+    ) {
+      return;
+    }
 
-  const ultimo =
-    partes.at(-1)!;
+    const ultimo =
+      partes.at(-1)!;
 
-  if (!/^\$?[\d.,]+$/.test(ultimo))
-    return;
+    if (
+      !/^\$?[\d.,]+$/.test(
+        ultimo
+      )
+    ) {
+      return;
+    }
 
-  const monto =
-    convertirMonto(ultimo);
+    const monto =
+      convertirMonto(
+        ultimo
+      );
 
-  if (
-    !Number.isFinite(monto) ||
-    monto <= 0
-  )
-    return;
-
-  const categoria =
-    normalizarCategoria(
-      partes.slice(0, -1).join(" ")
-    );
-
-  const usuario =
-    usuarioTelegram(ctx);
-
-  try {
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: "gastos!A:E",
-      valueInputOption: "USER_ENTERED",
-      insertDataOption: "INSERT_ROWS",
-      requestBody: {
-        values: [[
-          fechaArgentina(),
-          horaArgentina(),
-          usuario,
-          categoria,
-          monto,
-        ]],
-      },
-    });
-
-    await actualizarResumen();
-
-    await ctx.reply(
-      `✅ ${categoria} — ${formatoPesos(
+    if (
+      !Number.isFinite(
         monto
-      )}`
-    );
-  } catch (error) {
-    console.error(
-      "❌ Error registrando gasto:",
-      error
-    );
+      ) ||
+      monto <= 0
+    ) {
+      return;
+    }
 
-    await ctx.reply(
-      "❌ No pude registrar el gasto."
-    );
+    const categoria =
+      normalizarCategoria(
+        partes
+          .slice(0, -1)
+          .join(" ")
+      );
+
+    const usuario =
+      usuarioTelegram(ctx);
+
+    try {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId:
+          SPREADSHEET_ID,
+
+        range:
+          "gastos!A:E",
+
+        valueInputOption:
+          "USER_ENTERED",
+
+        insertDataOption:
+          "INSERT_ROWS",
+
+        requestBody: {
+          values: [[
+            fechaArgentina(),
+            horaArgentina(),
+            usuario,
+            categoria,
+            monto,
+          ]],
+        },
+      });
+
+      await actualizarResumen();
+
+      await ctx.reply(
+        `✅ ${categoria} — ${formatoPesos(
+          monto
+        )}`
+      );
+    } catch (error) {
+      console.error(
+        "❌ Error registrando gasto:",
+        error
+      );
+
+      await ctx.reply(
+        "❌ No pude registrar el gasto."
+      );
+    }
   }
-});
+);
 
 // ======================================================
 // AYUDA
 // ======================================================
 
-bot.command("ayuda", async ctx => {
-  cancelarSesion(ctx);
+bot.command(
+  "ayuda",
+  async ctx => {
+    cancelarSesion(ctx);
 
-  await ctx.reply(
-    `🤖 Esperancito\n\n` +
+    await ctx.reply(
+      `🤖 Esperancito\n\n` +
 
       `💸 Registrar gasto:\n` +
-      `Supermercado $25000\n\n` +
+      `Supermercado $25000\n` +
+      `Tarjetas $150000\n` +
+      `Nafta $50000\n\n` +
 
       `📊 Consultas:\n` +
-      `/hoy\n` +
-      `/mes\n` +
-      `/balance\n` +
-      `/presupuestos\n` +
-      `/proyeccion\n` +
-      `/ultimo\n\n` +
+      `/hoy — gastos de hoy\n` +
+      `/mes — gastos del mes\n` +
+      `/balance — balance familiar\n` +
+      `/presupuestos — ver presupuestos\n` +
+      `/proyeccion — próximos pagos\n` +
+      `/ultimo — último gasto\n\n` +
 
       `✏️ Cargar:\n` +
-      `/ingreso\n` +
-      `/presupuesto\n` +
-      `/cuotas\n\n` +
+      `/ingreso — registrar ingreso\n` +
+      `/presupuesto — definir presupuesto\n` +
+      `/cuotas — registrar compra en cuotas\n\n` +
 
       `🗑️ /deshacer — borrar tu último gasto\n` +
       `❌ /cancelar — cancelar una carga`
-  );
-});
+    );
+  }
+);
 
 // ======================================================
 // SERVIDOR HTTP PARA RENDER
 // ======================================================
 
 const PORT =
-  Number(process.env.PORT) || 3000;
+  Number(
+    process.env.PORT
+  ) || 3000;
 
 http
-  .createServer((req, res) => {
-    res.writeHead(200, {
-      "Content-Type":
-        "text/plain; charset=utf-8",
-    });
+  .createServer(
+    (req, res) => {
+      res.writeHead(
+        200,
+        {
+          "Content-Type":
+            "text/plain; charset=utf-8",
+        }
+      );
 
-    res.end(
-      "Esperancito está vivo 🤖"
-    );
-  })
-  .listen(PORT, "0.0.0.0", () => {
-    console.log(
-      `🌐 Servidor activo en puerto ${PORT}`
-    );
-  });
+      res.end(
+        "Esperancito está vivo 🤖"
+      );
+    }
+  )
+  .listen(
+    PORT,
+    "0.0.0.0",
+    () => {
+      console.log(
+        `🌐 Servidor activo en puerto ${PORT}`
+      );
+    }
+  );
+
+// ======================================================
+// REFRESCO AUTOMÁTICO DE PROYECCIÓN
+// ======================================================
+
+setInterval(
+  async () => {
+    try {
+      await reconstruirProyeccionHorizontal();
+
+      console.log(
+        "🔄 Proyección actualizada automáticamente"
+      );
+    } catch (error) {
+      console.error(
+        "⚠️ Error actualizando proyección automáticamente:",
+        error
+      );
+    }
+  },
+  6 * 60 * 60 * 1000
+);
 
 // ======================================================
 // INICIO
@@ -1516,7 +2068,17 @@ http
 
 async function iniciar() {
   await asegurarPestañas();
+
   await actualizarResumen();
+
+  try {
+    await reconstruirProyeccionHorizontal();
+  } catch (error) {
+    console.error(
+      "⚠️ No pude reconstruir la proyección al iniciar:",
+      error
+    );
+  }
 
   await bot.telegram.setMyCommands([
     {
@@ -1530,52 +2092,62 @@ async function iniciar() {
         "Gastos del mes",
     },
     {
-      command: "balance",
+      command:
+        "balance",
       description:
         "Balance del mes",
     },
     {
-      command: "ingreso",
+      command:
+        "ingreso",
       description:
         "Registrar ingreso",
     },
     {
-      command: "presupuesto",
+      command:
+        "presupuesto",
       description:
         "Definir presupuesto",
     },
     {
-      command: "presupuestos",
+      command:
+        "presupuestos",
       description:
         "Ver presupuestos",
     },
     {
-      command: "cuotas",
+      command:
+        "cuotas",
       description:
         "Registrar compra en cuotas",
     },
     {
-      command: "proyeccion",
+      command:
+        "proyeccion",
       description:
         "Ver próximos pagos",
     },
     {
-      command: "ultimo",
+      command:
+        "ultimo",
       description:
         "Último gasto",
     },
     {
-      command: "deshacer",
+      command:
+        "deshacer",
       description:
         "Borrar tu último gasto",
     },
     {
-      command: "cancelar",
+      command:
+        "cancelar",
       description:
         "Cancelar una carga",
     },
     {
-      command: "ayuda",
+      command:
+        "ayuda",
       description:
         "Ver ayuda",
     },
@@ -1588,9 +2160,14 @@ async function iniciar() {
   );
 }
 
-iniciar().catch(error => {
-  console.error(
-    "❌ Error iniciando Esperancito:",
-    error
-  );
-});
+iniciar().catch(
+  error => {
+    console.error(
+      "❌ Error iniciando Esperancito:",
+      error
+    );
+  }
+);
+);
+  }
+);
