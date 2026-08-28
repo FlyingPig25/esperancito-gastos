@@ -305,6 +305,86 @@ function nombreMesCorto(mes: string) {
   );
 }
 
+function formatoFechaCorta(
+  fechaISO: string
+) {
+  const [anio, mes, dia] =
+    fechaISO.split("-").map(Number);
+
+  return new Date(
+    Date.UTC(anio, mes - 1, dia)
+  ).toLocaleDateString("es-AR", {
+    day: "numeric",
+    month: "long",
+    timeZone: "UTC",
+  });
+}
+
+function formatoRangoFechas(
+  desde: string,
+  hasta: string
+) {
+  return `${formatoFechaCorta(
+    desde
+  )} al ${formatoFechaCorta(hasta)}`;
+}
+
+// Lunes (YYYY-MM-DD) de la semana calendario que contiene `fechaISO`.
+function inicioSemana(fechaISO: string) {
+  const [anio, mes, dia] =
+    fechaISO.split("-").map(Number);
+
+  const fecha = new Date(
+    Date.UTC(anio, mes - 1, dia)
+  );
+
+  const diaSemana = fecha.getUTCDay(); // 0 = domingo … 6 = sábado
+  const diasDesdeLunes =
+    diaSemana === 0 ? 6 : diaSemana - 1;
+
+  fecha.setUTCDate(
+    fecha.getUTCDate() - diasDesdeLunes
+  );
+
+  return fecha
+    .toISOString()
+    .slice(0, 10);
+}
+
+// Día de la semana (0 = domingo … 6 = sábado) según la fecha de
+// Argentina, no la del servidor.
+function diaSemanaArgentina() {
+  const [anio, mes, dia] =
+    fechaArgentina()
+      .split("-")
+      .map(Number);
+
+  return new Date(
+    Date.UTC(anio, mes - 1, dia)
+  ).getUTCDay();
+}
+
+// Hora (0-23) actual en Argentina.
+function horaEnArgentina() {
+  const partes = new Intl.DateTimeFormat(
+    "en-US",
+    {
+      timeZone:
+        "America/Argentina/Cordoba",
+      hour: "numeric",
+      hourCycle: "h23",
+    }
+  ).formatToParts(new Date());
+
+  const parteHora = partes.find(
+    parte => parte.type === "hour"
+  );
+
+  return parteHora
+    ? Number(parteHora.value)
+    : new Date().getHours();
+}
+
 function claveSesion(ctx: any) {
   return `${ctx.chat.id}:${ctx.from.id}`;
 }
@@ -374,6 +454,14 @@ const estructuras: Record<string, string[]> = {
     "Medio de pago",
     "Monto",
     "Fecha de registro",
+  ],
+
+  // Un registro por cada resumen automático (semanal o mensual) ya
+  // enviado, para no mandarlo dos veces en el mismo período.
+  resumenes_enviados: [
+    "Tipo",
+    "Período",
+    "Fecha de envío",
   ],
 
   proyeccion: [
@@ -447,6 +535,57 @@ async function obtenerGastos() {
     "gastos",
     "A2:E"
   );
+}
+
+// Suma los gastos (total familiar + por usuario) que caen dentro
+// del período que indique `dentroDelPeriodo`, recibiendo la fecha
+// ya normalizada (YYYY-MM-DD) de cada fila. La usan /hoy, /mes y
+// los resúmenes automáticos semanal/mensual.
+function resumirGastos(
+  gastos: any[][],
+  dentroDelPeriodo: (
+    fecha: string
+  ) => boolean
+) {
+  let familiar = 0;
+
+  const porUsuario = new Map<
+    string,
+    number
+  >();
+
+  for (const fila of gastos) {
+    const [
+      fechaRaw,
+      ,
+      usuario,
+      ,
+      montoRaw,
+    ] = fila;
+
+    const fecha =
+      normalizarFecha(fechaRaw);
+
+    if (!fecha || !usuario) continue;
+    if (!dentroDelPeriodo(fecha)) {
+      continue;
+    }
+
+    const monto =
+      numeroDesdeSheet(montoRaw);
+
+    if (!Number.isFinite(monto)) continue;
+
+    familiar += monto;
+
+    porUsuario.set(
+      usuario,
+      (porUsuario.get(usuario) ?? 0) +
+        monto
+    );
+  }
+
+  return { familiar, porUsuario };
 }
 
 async function actualizarResumen() {
@@ -569,46 +708,18 @@ bot.command("hoy", async ctx => {
   const gastos = await obtenerGastos();
   const hoy = fechaArgentina();
 
-  let familiar = 0;
-
-  const usuarios =
-    new Map<string, number>();
-
-  for (const fila of gastos) {
-    const [
-      fechaRaw,
-      ,
-      usuario,
-      ,
-      montoRaw,
-    ] = fila;
-
-    if (
-      normalizarFecha(fechaRaw) !== hoy
-    ) {
-      continue;
-    }
-
-    const monto =
-      numeroDesdeSheet(montoRaw);
-
-    if (!Number.isFinite(monto)) continue;
-
-    familiar += monto;
-
-    usuarios.set(
-      usuario,
-      (usuarios.get(usuario) ?? 0) +
-        monto
+  const { familiar, porUsuario } =
+    resumirGastos(
+      gastos,
+      fecha => fecha === hoy
     );
-  }
 
   let mensaje =
     `💰 Hoy: ${formatoPesos(
       familiar
     )}`;
 
-  for (const [usuario, total] of usuarios) {
+  for (const [usuario, total] of porUsuario) {
     mensaje +=
       `\n${usuario}: ${formatoPesos(
         total
@@ -628,40 +739,10 @@ bot.command("mes", async ctx => {
   const gastos = await obtenerGastos();
   const mes = mesActual();
 
-  let familiar = 0;
-
-  const usuarios =
-    new Map<string, number>();
-
-  for (const fila of gastos) {
-    const [
-      fechaRaw,
-      ,
-      usuario,
-      ,
-      montoRaw,
-    ] = fila;
-
-    const fecha =
-      normalizarFecha(fechaRaw);
-
-    if (!fecha.startsWith(mes)) {
-      continue;
-    }
-
-    const monto =
-      numeroDesdeSheet(montoRaw);
-
-    if (!Number.isFinite(monto)) continue;
-
-    familiar += monto;
-
-    usuarios.set(
-      usuario,
-      (usuarios.get(usuario) ?? 0) +
-        monto
+  const { familiar, porUsuario } =
+    resumirGastos(gastos, fecha =>
+      fecha.startsWith(mes)
     );
-  }
 
   let mensaje =
     `📅 ${nombreMes(mes)}\n` +
@@ -669,7 +750,7 @@ bot.command("mes", async ctx => {
       familiar
     )}`;
 
-  for (const [usuario, total] of usuarios) {
+  for (const [usuario, total] of porUsuario) {
     mensaje +=
       `\n${usuario}: ${formatoPesos(
         total
@@ -1482,6 +1563,40 @@ async function registrarPagosDelMes(
   return pagosRealizados;
 }
 
+// Manda `mensaje` a todos los chats en ALLOWED_CHAT_IDS (los avisos
+// de pago de tarjeta y los resúmenes automáticos usan este mismo
+// mecanismo). Si no hay ningún chat configurado, no hay a quién
+// mandarle nada: se avisa por log y se devuelve false para que
+// quien llama sepa que el envío no se hizo (y no lo marque como
+// enviado).
+async function enviarATodos(
+  mensaje: string
+) {
+  if (!ALLOWED_CHAT_IDS.length) {
+    console.warn(
+      "⚠️ ALLOWED_CHAT_IDS no está configurado: no hay a quién mandar el mensaje automático."
+    );
+
+    return false;
+  }
+
+  for (const chatId of ALLOWED_CHAT_IDS) {
+    try {
+      await bot.telegram.sendMessage(
+        chatId,
+        mensaje
+      );
+    } catch (error) {
+      console.error(
+        `⚠️ No pude enviar el mensaje a ${chatId}:`,
+        error
+      );
+    }
+  }
+
+  return true;
+}
+
 async function notificarPagosRegistrados(
   pagos: {
     usuario: string;
@@ -1489,10 +1604,7 @@ async function notificarPagosRegistrados(
     monto: number;
   }[]
 ) {
-  if (
-    !pagos.length ||
-    !ALLOWED_CHAT_IDS.length
-  ) {
+  if (!pagos.length) {
     return;
   }
 
@@ -1508,17 +1620,263 @@ async function notificarPagosRegistrados(
       )}`;
   }
 
-  for (const chatId of ALLOWED_CHAT_IDS) {
-    try {
-      await bot.telegram.sendMessage(
-        chatId,
-        mensaje
-      );
-    } catch (error) {
-      console.error(
-        `⚠️ No pude avisar a ${chatId} sobre pagos de tarjeta:`,
-        error
-      );
+  await enviarATodos(mensaje);
+}
+
+// ======================================================
+// RESÚMENES AUTOMÁTICOS (semanal y mensual)
+// ======================================================
+// Se mandan solos, sin que nadie tenga que pedirlos, a los mismos
+// chats de ALLOWED_CHAT_IDS que reciben el aviso de pago de
+// tarjeta. Si esa variable no está configurada, no hay a quién
+// mandarle el resumen (ver enviarATodos) y por lo tanto tampoco se
+// marca como enviado, para reintentar apenas se configure.
+//
+// - Semanal: domingo desde las 20hs, con la semana lunes a domingo
+//   que recién termina.
+// - Mensual: día 1 desde las 9hs, con el mes calendario que recién
+//   terminó.
+//
+// resumenes_enviados guarda un renglón por (Tipo, Período) ya
+// mandado, para no duplicar el resumen si el chequeo se dispara
+// más de una vez dentro de la misma ventana horaria.
+
+const HORA_RESUMEN_SEMANAL = 20;
+const HORA_RESUMEN_MENSUAL = 9;
+
+async function obtenerResumenesEnviados() {
+  return obtenerFilas(
+    "resumenes_enviados",
+    "A2:C"
+  );
+}
+
+async function yaEnviadoResumen(
+  tipo: string,
+  periodo: string
+) {
+  const filas =
+    await obtenerResumenesEnviados();
+
+  return filas.some(
+    fila =>
+      String(fila[0]) === tipo &&
+      String(fila[1]) === periodo
+  );
+}
+
+async function marcarResumenEnviado(
+  tipo: string,
+  periodo: string
+) {
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "resumenes_enviados!A:C",
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: [[
+        tipo,
+        periodo,
+        `${fechaArgentina()} ${horaArgentina()}`,
+      ]],
+    },
+  });
+}
+
+async function generarResumenSemanal() {
+  const hoy = fechaArgentina();
+  const desde = inicioSemana(hoy);
+
+  const gastos = await obtenerGastos();
+
+  const { familiar, porUsuario } =
+    resumirGastos(
+      gastos,
+      fecha =>
+        fecha >= desde && fecha <= hoy
+    );
+
+  let mensaje =
+    `📆 Resumen semanal — ${formatoRangoFechas(
+      desde,
+      hoy
+    )}\n` +
+    `💸 Total: ${formatoPesos(
+      familiar
+    )}`;
+
+  for (const [usuario, total] of porUsuario) {
+    mensaje +=
+      `\n• ${usuario}: ${formatoPesos(
+        total
+      )}`;
+  }
+
+  return { mensaje, periodo: desde };
+}
+
+async function generarResumenMensual() {
+  // El mes calendario que recién terminó: si hoy es el día 1,
+  // mesActual() ya es el mes nuevo.
+  const mes = sumarMeses(
+    mesActual(),
+    -1
+  );
+
+  const gastos = await obtenerGastos();
+
+  const {
+    familiar: totalGastos,
+    porUsuario: gastosPorUsuario,
+  } = resumirGastos(gastos, fecha =>
+    fecha.startsWith(mes)
+  );
+
+  const ingresos = await obtenerFilas(
+    "ingresos",
+    "A2:C"
+  );
+
+  let totalIngresos = 0;
+
+  const ingresoPorPersona = new Map<
+    string,
+    number
+  >();
+
+  for (const fila of ingresos) {
+    if (String(fila[0]) !== mes) {
+      continue;
+    }
+
+    const persona = String(fila[1]);
+    const monto = numeroDesdeSheet(
+      fila[2]
+    );
+
+    if (!Number.isFinite(monto)) {
+      continue;
+    }
+
+    totalIngresos += monto;
+
+    ingresoPorPersona.set(
+      persona,
+      (ingresoPorPersona.get(
+        persona
+      ) ?? 0) + monto
+    );
+  }
+
+  const saldo =
+    totalIngresos - totalGastos;
+
+  let mensaje =
+    `📅 Resumen mensual — ${nombreMes(
+      mes
+    )}\n\n` +
+    `💸 Gastos: ${formatoPesos(
+      totalGastos
+    )}`;
+
+  for (const [
+    usuario,
+    total,
+  ] of gastosPorUsuario) {
+    mensaje +=
+      `\n• ${usuario}: ${formatoPesos(
+        total
+      )}`;
+  }
+
+  mensaje +=
+    `\n\n💵 Ingresos: ${formatoPesos(
+      totalIngresos
+    )}`;
+
+  for (const [
+    persona,
+    total,
+  ] of ingresoPorPersona) {
+    mensaje +=
+      `\n• ${persona}: ${formatoPesos(
+        total
+      )}`;
+  }
+
+  mensaje +=
+    `\n\n${
+      saldo >= 0 ? "✅" : "🔴"
+    } Saldo: ${formatoPesos(saldo)}`;
+
+  return { mensaje, periodo: mes };
+}
+
+async function verificarResumenesAutomaticos() {
+  const diaSemana =
+    diaSemanaArgentina(); // 0 = domingo
+  const hora = horaEnArgentina();
+
+  if (
+    diaSemana === 0 &&
+    hora >= HORA_RESUMEN_SEMANAL
+  ) {
+    const { mensaje, periodo } =
+      await generarResumenSemanal();
+
+    if (
+      !(await yaEnviadoResumen(
+        "Semanal",
+        periodo
+      ))
+    ) {
+      const enviado =
+        await enviarATodos(mensaje);
+
+      if (enviado) {
+        await marcarResumenEnviado(
+          "Semanal",
+          periodo
+        );
+
+        console.log(
+          `✅ Resumen semanal enviado (semana del ${periodo})`
+        );
+      }
+    }
+  }
+
+  const diaDelMes = Number(
+    fechaArgentina().split("-")[2]
+  );
+
+  if (
+    diaDelMes === 1 &&
+    hora >= HORA_RESUMEN_MENSUAL
+  ) {
+    const { mensaje, periodo } =
+      await generarResumenMensual();
+
+    if (
+      !(await yaEnviadoResumen(
+        "Mensual",
+        periodo
+      ))
+    ) {
+      const enviado =
+        await enviarATodos(mensaje);
+
+      if (enviado) {
+        await marcarResumenEnviado(
+          "Mensual",
+          periodo
+        );
+
+        console.log(
+          `✅ Resumen mensual enviado (${periodo})`
+        );
+      }
     }
   }
 }
@@ -2498,6 +2856,28 @@ setInterval(
 );
 
 // ======================================================
+// REFRESCO AUTOMÁTICO DE RESÚMENES (semanal y mensual)
+// ======================================================
+// Chequeo horario: verificarResumenesAutomaticos ya se fija por sí
+// sola si hoy/ahora corresponde mandar el resumen y si todavía no
+// se mandó, así que no importa que el intervalo no caiga justo en
+// la hora exacta.
+
+setInterval(
+  async () => {
+    try {
+      await verificarResumenesAutomaticos();
+    } catch (error) {
+      console.error(
+        "⚠️ Error chequeando resúmenes automáticos:",
+        error
+      );
+    }
+  },
+  60 * 60 * 1000
+);
+
+// ======================================================
 // INICIO
 // ======================================================
 
@@ -2514,6 +2894,18 @@ async function iniciar() {
   } catch (error) {
     console.error(
       "⚠️ No pude reconstruir la proyección / registrar pagos al iniciar:",
+      error
+    );
+  }
+
+  try {
+    // Igual que arriba: si el bot estuvo apagado justo cuando
+    // correspondía mandar un resumen, lo chequeamos también al
+    // arrancar.
+    await verificarResumenesAutomaticos();
+  } catch (error) {
+    console.error(
+      "⚠️ No pude chequear los resúmenes automáticos al iniciar:",
       error
     );
   }
