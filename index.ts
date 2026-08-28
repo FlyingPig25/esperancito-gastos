@@ -11,6 +11,21 @@ const GOOGLE_CREDENTIALS = JSON.parse(
 const bot = new Telegraf(TOKEN);
 
 // ======================================================
+// ID (siempre disponible, ANTES del control de acceso)
+// ======================================================
+// Se registra a propósito antes del bot.use(...) de más abajo:
+// así queda exento del filtro de ALLOWED_CHAT_IDS. Si esa lista
+// está mal configurada (o todavía no se configuró), /id sigue
+// respondiendo el chat id — si no, quien queda bloqueado no
+// tendría forma de saber qué id poner en ALLOWED_CHAT_IDS.
+bot.command("id", async ctx => {
+  await ctx.reply(
+    `🆔 Chat: ${ctx.chat.id}\n` +
+      `👤 Usuario: ${usuarioTelegram(ctx)} (${ctx.from.id})`
+  );
+});
+
+// ======================================================
 // CONTROL DE ACCESO
 // ======================================================
 // ALLOWED_CHAT_IDS: lista de chat.id separados por coma
@@ -2706,19 +2721,6 @@ bot.command(
 );
 
 // ======================================================
-// ID (temporal, para configurar ALLOWED_CHAT_IDS)
-// ======================================================
-
-bot.command("id", async ctx => {
-  cancelarSesion(ctx);
-
-  await ctx.reply(
-    `🆔 Chat: ${ctx.chat.id}\n` +
-      `👤 Usuario: ${usuarioTelegram(ctx)} (${ctx.from.id})`
-  );
-});
-
-// ======================================================
 // AYUDA
 // ======================================================
 
@@ -2750,7 +2752,8 @@ bot.command(
       `/cuotas — registrar compra en cuotas\n\n` +
 
       `🗑️ /deshacer — borrar tu último gasto\n` +
-      `❌ /cancelar — cancelar una carga`
+      `❌ /cancelar — cancelar una carga\n` +
+      `🆔 /id — tu chat id (para configurar ALLOWED_CHAT_IDS)`
     );
   }
 );
@@ -2986,6 +2989,11 @@ async function iniciar() {
         "ayuda",
       description:
         "Ver ayuda",
+    },
+    {
+      command: "id",
+      description:
+        "Ver tu chat id (para configurar ALLOWED_CHAT_IDS)",
     },
   ]);
 
