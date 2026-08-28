@@ -109,13 +109,47 @@ const aliases: Record<string, string> = {
   entretenimiento: "Entretenimiento",
 };
 
-function normalizarCategoria(texto: string) {
-  const limpia = texto.trim().toLowerCase();
+// Lista cerrada de categorías: el bot solo reconoce estos nombres
+// (o los alias de arriba). Si el texto no matchea ninguno,
+// normalizarCategoria devuelve null y quien llama debe pedir que
+// se elija una categoría válida en vez de inventar una nueva.
+const categoriasValidas = [
+  ...new Set(Object.values(aliases)),
+].sort((a, b) => a.localeCompare(b, "es"));
 
-  return (
-    aliases[limpia] ??
-    limpia.charAt(0).toUpperCase() + limpia.slice(1)
+const aliasesNormalizados = new Map<
+  string,
+  string
+>();
+
+for (const [clave, valor] of Object.entries(
+  aliases
+)) {
+  aliasesNormalizados.set(
+    quitarAcentos(clave.toLowerCase()),
+    valor
   );
+}
+
+for (const categoria of categoriasValidas) {
+  aliasesNormalizados.set(
+    quitarAcentos(categoria.toLowerCase()),
+    categoria
+  );
+}
+
+function normalizarCategoria(
+  texto: string
+): string | null {
+  const limpia = quitarAcentos(
+    texto.trim().toLowerCase()
+  );
+
+  return aliasesNormalizados.get(limpia) ?? null;
+}
+
+function listaCategorias() {
+  return categoriasValidas.join(", ");
 }
 // ======================================================
 // UTILIDADES
@@ -329,6 +363,17 @@ const estructuras: Record<string, string[]> = {
     "Mes",
     "Cuota",
     "Monto",
+  ],
+
+  // Un registro por cada (Mes, Usuario, Tarjeta) que ya se volcó a
+  // "gastos" como pago real. Evita registrar dos veces el mismo pago
+  // de tarjeta en un mes.
+  cuotas_registros: [
+    "Mes",
+    "Usuario",
+    "Medio de pago",
+    "Monto",
+    "Fecha de registro",
   ],
 
   proyeccion: [
@@ -876,7 +921,7 @@ bot.command("presupuesto", async ctx => {
   });
 
   await ctx.reply(
-    "📊 ¿Para qué categoría querés establecer el presupuesto?"
+    `📊 ¿Para qué categoría querés establecer el presupuesto?\n\n${listaCategorias()}`
   );
 });
 
@@ -1292,6 +1337,192 @@ async function reconstruirProyeccionHorizontal(
   );
 }
 
+// ======================================================
+// PAGO MENSUAL DE TARJETAS (cuotas -> gastos reales)
+// ======================================================
+// Cada mes, la cuota que corresponde a ese mes para cada tarjeta
+// (usuario + medio de pago) se vuelca como UN gasto real en la
+// pestaña "gastos" (categoría "Tarjetas"), sumando todas las
+// compras en cuotas de esa tarjeta que caen ese mes. Así el pago
+// de la tarjeta impacta en /mes, /balance y /presupuestos como
+// cualquier otro gasto, en vez de vivir solo en la proyección.
+//
+// cuotas_registros lleva un renglón por cada (Mes, Usuario,
+// Tarjeta) ya volcado, para no duplicar el pago si esta función
+// se llama más de una vez en el mismo mes (arranque del bot +
+// chequeo periódico).
+
+async function obtenerCuotasRegistradas() {
+  return obtenerFilas(
+    "cuotas_registros",
+    "A2:E"
+  );
+}
+
+function claveRegistroPago(
+  mes: string,
+  usuario: string,
+  medio: string
+) {
+  return `${mes}|${usuario}|${normalizarMedioPago(
+    medio
+  )}`;
+}
+
+async function registrarPagosDelMes(
+  cuotasPrecargadas?: any[][]
+) {
+  const mes = mesActual();
+
+  const cuotas =
+    cuotasPrecargadas ??
+    (await obtenerCuotasDatos());
+
+  const { agrupado } = agruparCuotas(
+    cuotas,
+    [mes]
+  );
+
+  if (!agrupado.size) {
+    return [];
+  }
+
+  const registrados =
+    await obtenerCuotasRegistradas();
+
+  const yaRegistrados = new Set(
+    registrados.map(fila =>
+      claveRegistroPago(
+        String(fila[0] ?? ""),
+        String(fila[1] ?? ""),
+        String(fila[2] ?? "")
+      )
+    )
+  );
+
+  const nuevosGastos: any[][] = [];
+  const nuevosRegistros: any[][] = [];
+  const pagosRealizados: {
+    usuario: string;
+    medio: string;
+    monto: number;
+  }[] = [];
+
+  for (const grupo of agrupado.values()) {
+    const monto =
+      grupo.montos.get(mes) ?? 0;
+
+    if (monto <= 0) {
+      continue;
+    }
+
+    const clave = claveRegistroPago(
+      mes,
+      grupo.usuario,
+      grupo.medio
+    );
+
+    if (yaRegistrados.has(clave)) {
+      continue;
+    }
+
+    nuevosGastos.push([
+      fechaArgentina(),
+      horaArgentina(),
+      grupo.usuario,
+      "Tarjetas",
+      monto,
+    ]);
+
+    nuevosRegistros.push([
+      mes,
+      grupo.usuario,
+      grupo.medio,
+      monto,
+      fechaArgentina(),
+    ]);
+
+    pagosRealizados.push({
+      usuario: grupo.usuario,
+      medio: grupo.medio,
+      monto,
+    });
+  }
+
+  if (!nuevosGastos.length) {
+    return [];
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "gastos!A:E",
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: nuevosGastos,
+    },
+  });
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "cuotas_registros!A:E",
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: nuevosRegistros,
+    },
+  });
+
+  await actualizarResumen();
+
+  console.log(
+    `✅ ${pagosRealizados.length} pago(s) de tarjeta registrados como gasto para ${nombreMes(mes)}`
+  );
+
+  return pagosRealizados;
+}
+
+async function notificarPagosRegistrados(
+  pagos: {
+    usuario: string;
+    medio: string;
+    monto: number;
+  }[]
+) {
+  if (
+    !pagos.length ||
+    !ALLOWED_CHAT_IDS.length
+  ) {
+    return;
+  }
+
+  let mensaje =
+    `💳 Se registraron los pagos de tarjeta de ${nombreMes(
+      mesActual()
+    )}:\n`;
+
+  for (const pago of pagos) {
+    mensaje +=
+      `\n${pago.usuario} — ${pago.medio}: ${formatoPesos(
+        pago.monto
+      )}`;
+  }
+
+  for (const chatId of ALLOWED_CHAT_IDS) {
+    try {
+      await bot.telegram.sendMessage(
+        chatId,
+        mensaje
+      );
+    } catch (error) {
+      console.error(
+        `⚠️ No pude avisar a ${chatId} sobre pagos de tarjeta:`,
+        error
+      );
+    }
+  }
+}
+
 async function guardarCuotas(
   ctx: any,
   sesion: Extract<
@@ -1371,7 +1602,7 @@ async function guardarCuotas(
     },
   });
 
-  await reconstruirProyeccionHorizontal();
+  await actualizarProyeccionYPagos();
 
   const ultima =
     sumarMeses(
@@ -1708,10 +1939,18 @@ async function procesarSesion(
       sesion.paso ===
       "categoria"
     ) {
-      sesion.categoria =
-        normalizarCategoria(
-          texto
+      const categoria =
+        normalizarCategoria(texto);
+
+      if (!categoria) {
+        await ctx.reply(
+          `❌ No reconozco esa categoría. Elegí una de estas:\n${listaCategorias()}`
         );
+
+        return true;
+      }
+
+      sesion.categoria = categoria;
 
       sesion.paso =
         "monto";
@@ -2037,6 +2276,14 @@ bot.on(
           .join(" ")
       );
 
+    if (!categoria) {
+      await ctx.reply(
+        `❌ No reconozco esa categoría. Elegí una de estas:\n${listaCategorias()}`
+      );
+
+      return;
+    }
+
     const usuario =
       usuarioTelegram(ctx);
 
@@ -2086,6 +2333,21 @@ bot.on(
 );
 
 // ======================================================
+// CATEGORÍAS DISPONIBLES
+// ======================================================
+
+bot.command(
+  "categorias",
+  async ctx => {
+    cancelarSesion(ctx);
+
+    await ctx.reply(
+      `🏷️ Categorías reconocidas:\n${listaCategorias()}`
+    );
+  }
+);
+
+// ======================================================
 // ID (temporal, para configurar ALLOWED_CHAT_IDS)
 // ======================================================
 
@@ -2121,6 +2383,7 @@ bot.command(
       `/balance — balance familiar\n` +
       `/presupuestos — ver presupuestos\n` +
       `/proyeccion [meses] — próximos pagos por tarjeta (default 6)\n` +
+      `/categorias — categorías reconocidas\n` +
       `/ultimo — último gasto\n\n` +
 
       `✏️ Cargar:\n` +
@@ -2192,20 +2455,41 @@ http
   );
 
 // ======================================================
-// REFRESCO AUTOMÁTICO DE PROYECCIÓN
+// REFRESCO AUTOMÁTICO DE PROYECCIÓN Y PAGOS DE TARJETA
 // ======================================================
+// Lee cuotas_datos una sola vez, refresca la hoja "proyeccion" y
+// registra en "gastos" el pago del mes de cada tarjeta que todavía
+// no se hubiera volcado (ver registrarPagosDelMes).
+
+async function actualizarProyeccionYPagos() {
+  const cuotas = await obtenerCuotasDatos();
+
+  await reconstruirProyeccionHorizontal(
+    cuotas
+  );
+
+  const pagos = await registrarPagosDelMes(
+    cuotas
+  );
+
+  if (pagos.length) {
+    await notificarPagosRegistrados(pagos);
+  }
+
+  return pagos;
+}
 
 setInterval(
   async () => {
     try {
-      await reconstruirProyeccionHorizontal();
+      await actualizarProyeccionYPagos();
 
       console.log(
-        "🔄 Proyección actualizada automáticamente"
+        "🔄 Proyección y pagos de tarjeta actualizados automáticamente"
       );
     } catch (error) {
       console.error(
-        "⚠️ Error actualizando proyección automáticamente:",
+        "⚠️ Error actualizando proyección/pagos automáticamente:",
         error
       );
     }
@@ -2223,10 +2507,13 @@ async function iniciar() {
   await actualizarResumen();
 
   try {
-    await reconstruirProyeccionHorizontal();
+    // Por si el bot estuvo apagado cuando cambió el mes, al
+    // arrancar también chequeamos si hay pagos de tarjeta
+    // pendientes de volcar a "gastos".
+    await actualizarProyeccionYPagos();
   } catch (error) {
     console.error(
-      "⚠️ No pude reconstruir la proyección al iniciar:",
+      "⚠️ No pude reconstruir la proyección / registrar pagos al iniciar:",
       error
     );
   }
@@ -2277,6 +2564,12 @@ async function iniciar() {
         "proyeccion",
       description:
         "Ver próximos pagos",
+    },
+    {
+      command:
+        "categorias",
+      description:
+        "Ver categorías reconocidas",
     },
     {
       command:
