@@ -109,13 +109,47 @@ const aliases: Record<string, string> = {
   entretenimiento: "Entretenimiento",
 };
 
-function normalizarCategoria(texto: string) {
-  const limpia = texto.trim().toLowerCase();
+// Lista cerrada de categorías: el bot solo reconoce estos nombres
+// (o los alias de arriba). Si el texto no matchea ninguno,
+// normalizarCategoria devuelve null y quien llama debe pedir que
+// se elija una categoría válida en vez de inventar una nueva.
+const categoriasValidas = [
+  ...new Set(Object.values(aliases)),
+].sort((a, b) => a.localeCompare(b, "es"));
 
-  return (
-    aliases[limpia] ??
-    limpia.charAt(0).toUpperCase() + limpia.slice(1)
+const aliasesNormalizados = new Map<
+  string,
+  string
+>();
+
+for (const [clave, valor] of Object.entries(
+  aliases
+)) {
+  aliasesNormalizados.set(
+    quitarAcentos(clave.toLowerCase()),
+    valor
   );
+}
+
+for (const categoria of categoriasValidas) {
+  aliasesNormalizados.set(
+    quitarAcentos(categoria.toLowerCase()),
+    categoria
+  );
+}
+
+function normalizarCategoria(
+  texto: string
+): string | null {
+  const limpia = quitarAcentos(
+    texto.trim().toLowerCase()
+  );
+
+  return aliasesNormalizados.get(limpia) ?? null;
+}
+
+function listaCategorias() {
+  return categoriasValidas.join(", ");
 }
 // ======================================================
 // UTILIDADES
@@ -251,15 +285,43 @@ function nombreMes(mes: string) {
   });
 }
 
+function nombreMesCorto(mes: string) {
+  const [anio, numeroMes] = mes.split("-").map(Number);
+
+  const texto = new Date(
+    Date.UTC(anio, numeroMes - 1, 1)
+  ).toLocaleDateString("es-AR", {
+    month: "short",
+    timeZone: "UTC",
+  });
+
+  const limpio = texto
+    .replace(".", "")
+    .trim();
+
+  return (
+    limpio.charAt(0).toUpperCase() +
+    limpio.slice(1)
+  );
+}
+
 function claveSesion(ctx: any) {
   return `${ctx.chat.id}:${ctx.from.id}`;
 }
 
-function normalizarMedioPago(texto: string) {
+function quitarAcentos(texto: string) {
   return texto
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function normalizarMedioPago(texto: string) {
+  return quitarAcentos(
+    texto
+      .trim()
+      .replace(/\s+/g, " ")
+      .toLowerCase()
+  );
 }
 // ======================================================
 // PESTAÑAS
@@ -301,6 +363,17 @@ const estructuras: Record<string, string[]> = {
     "Mes",
     "Cuota",
     "Monto",
+  ],
+
+  // Un registro por cada (Mes, Usuario, Tarjeta) que ya se volcó a
+  // "gastos" como pago real. Evita registrar dos veces el mismo pago
+  // de tarjeta en un mes.
+  cuotas_registros: [
+    "Mes",
+    "Usuario",
+    "Medio de pago",
+    "Monto",
+    "Fecha de registro",
   ],
 
   proyeccion: [
@@ -848,7 +921,7 @@ bot.command("presupuesto", async ctx => {
   });
 
   await ctx.reply(
-    "📊 ¿Para qué categoría querés establecer el presupuesto?"
+    `📊 ¿Para qué categoría querés establecer el presupuesto?\n\n${listaCategorias()}`
   );
 });
 
@@ -975,37 +1048,51 @@ async function obtenerCuotasDatos() {
   );
 }
 
-async function reconstruirProyeccionHorizontal() {
-  const cuotas =
-    await obtenerCuotasDatos();
-
+// Próximos `cantidad` meses, empezando por el mes que sigue al actual.
+// Ej: si hoy es agosto 2026, construirMesesAdelante(3) =>
+// [2026-09, 2026-10, 2026-11]
+function construirMesesAdelante(
+  cantidad: number
+) {
   const meses: string[] = [];
 
-  // Mostramos desde el mes siguiente y 12 meses hacia adelante
-  for (let i = 1; i <= 12; i++) {
+  for (let i = 1; i <= cantidad; i++) {
     meses.push(
       sumarMeses(mesActual(), i)
     );
   }
 
-  // usuario|medioPago => nombre visible + montos por mes
+  return meses;
+}
+
+type GrupoTarjeta = {
+  usuario: string;
+  medio: string;
+  montos: Map<string, number>;
+};
+
+type DetalleCompra = GrupoTarjeta & {
+  concepto: string;
+};
+
+// Toma las filas de cuotas_datos y las agrupa por usuario+tarjeta
+// (sumando todas las cuotas que caen en el mismo mes), y además
+// por usuario+tarjeta+concepto para el detalle de cada compra.
+// El agrupado por tarjeta usa el medio de pago normalizado (sin
+// mayúsculas/acentos) como clave, así "BNA Máster" y "bna master"
+// se suman juntos en vez de aparecer como tarjetas distintas.
+function agruparCuotas(
+  cuotas: any[][],
+  meses: string[]
+) {
   const agrupado = new Map<
     string,
-    {
-      usuario: string;
-      medio: string;
-      montos: Map<string, number>;
-    }
+    GrupoTarjeta
   >();
 
   const detalleCompras = new Map<
     string,
-    {
-      usuario: string;
-      medio: string;
-      concepto: string;
-      montos: Map<string, number>;
-    }
+    DetalleCompra
   >();
 
   for (const fila of cuotas) {
@@ -1043,7 +1130,7 @@ async function reconstruirProyeccionHorizontal() {
       continue;
     }
 
-    // Solo mostramos los 12 meses de la vista
+    // Solo mostramos los meses de la ventana pedida
     if (!meses.includes(mes)) {
       continue;
     }
@@ -1093,18 +1180,16 @@ async function reconstruirProyeccionHorizontal() {
     );
   }
 
-  const encabezadoResumen = [
-    "Usuario / Tarjeta",
-    ...meses.map(nombreMes),
-  ];
+  return { agrupado, detalleCompras };
+}
 
-  const filasResumen: any[][] = [
-    encabezadoResumen,
-  ];
-
-  const gruposOrdenados = [
-    ...agrupado.values(),
-  ].sort((a, b) => {
+function ordenarPorUsuarioYMedio<
+  T extends {
+    usuario: string;
+    medio: string;
+  }
+>(items: T[]) {
+  return [...items].sort((a, b) => {
     const usuarioCompare =
       a.usuario.localeCompare(
         b.usuario,
@@ -1120,6 +1205,38 @@ async function reconstruirProyeccionHorizontal() {
       "es"
     );
   });
+}
+
+// Reconstruye la pestaña "proyeccion" con los próximos 12 meses en
+// columnas. Si ya se leyeron las filas de cuotas_datos en otro lado
+// (por ejemplo desde /proyeccion) se pueden pasar en `cuotasPrecargadas`
+// para no leer la hoja dos veces.
+async function reconstruirProyeccionHorizontal(
+  cuotasPrecargadas?: any[][]
+) {
+  const cuotas =
+    cuotasPrecargadas ??
+    (await obtenerCuotasDatos());
+
+  const meses =
+    construirMesesAdelante(12);
+
+  const { agrupado, detalleCompras } =
+    agruparCuotas(cuotas, meses);
+
+  const encabezadoResumen = [
+    "Usuario / Tarjeta",
+    ...meses.map(nombreMes),
+  ];
+
+  const filasResumen: any[][] = [
+    encabezadoResumen,
+  ];
+
+  const gruposOrdenados =
+    ordenarPorUsuarioYMedio([
+      ...agrupado.values(),
+    ]);
 
   for (const grupo of gruposOrdenados) {
     filasResumen.push([
@@ -1220,6 +1337,192 @@ async function reconstruirProyeccionHorizontal() {
   );
 }
 
+// ======================================================
+// PAGO MENSUAL DE TARJETAS (cuotas -> gastos reales)
+// ======================================================
+// Cada mes, la cuota que corresponde a ese mes para cada tarjeta
+// (usuario + medio de pago) se vuelca como UN gasto real en la
+// pestaña "gastos" (categoría "Tarjetas"), sumando todas las
+// compras en cuotas de esa tarjeta que caen ese mes. Así el pago
+// de la tarjeta impacta en /mes, /balance y /presupuestos como
+// cualquier otro gasto, en vez de vivir solo en la proyección.
+//
+// cuotas_registros lleva un renglón por cada (Mes, Usuario,
+// Tarjeta) ya volcado, para no duplicar el pago si esta función
+// se llama más de una vez en el mismo mes (arranque del bot +
+// chequeo periódico).
+
+async function obtenerCuotasRegistradas() {
+  return obtenerFilas(
+    "cuotas_registros",
+    "A2:E"
+  );
+}
+
+function claveRegistroPago(
+  mes: string,
+  usuario: string,
+  medio: string
+) {
+  return `${mes}|${usuario}|${normalizarMedioPago(
+    medio
+  )}`;
+}
+
+async function registrarPagosDelMes(
+  cuotasPrecargadas?: any[][]
+) {
+  const mes = mesActual();
+
+  const cuotas =
+    cuotasPrecargadas ??
+    (await obtenerCuotasDatos());
+
+  const { agrupado } = agruparCuotas(
+    cuotas,
+    [mes]
+  );
+
+  if (!agrupado.size) {
+    return [];
+  }
+
+  const registrados =
+    await obtenerCuotasRegistradas();
+
+  const yaRegistrados = new Set(
+    registrados.map(fila =>
+      claveRegistroPago(
+        String(fila[0] ?? ""),
+        String(fila[1] ?? ""),
+        String(fila[2] ?? "")
+      )
+    )
+  );
+
+  const nuevosGastos: any[][] = [];
+  const nuevosRegistros: any[][] = [];
+  const pagosRealizados: {
+    usuario: string;
+    medio: string;
+    monto: number;
+  }[] = [];
+
+  for (const grupo of agrupado.values()) {
+    const monto =
+      grupo.montos.get(mes) ?? 0;
+
+    if (monto <= 0) {
+      continue;
+    }
+
+    const clave = claveRegistroPago(
+      mes,
+      grupo.usuario,
+      grupo.medio
+    );
+
+    if (yaRegistrados.has(clave)) {
+      continue;
+    }
+
+    nuevosGastos.push([
+      fechaArgentina(),
+      horaArgentina(),
+      grupo.usuario,
+      "Tarjetas",
+      monto,
+    ]);
+
+    nuevosRegistros.push([
+      mes,
+      grupo.usuario,
+      grupo.medio,
+      monto,
+      fechaArgentina(),
+    ]);
+
+    pagosRealizados.push({
+      usuario: grupo.usuario,
+      medio: grupo.medio,
+      monto,
+    });
+  }
+
+  if (!nuevosGastos.length) {
+    return [];
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "gastos!A:E",
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: nuevosGastos,
+    },
+  });
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "cuotas_registros!A:E",
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: nuevosRegistros,
+    },
+  });
+
+  await actualizarResumen();
+
+  console.log(
+    `✅ ${pagosRealizados.length} pago(s) de tarjeta registrados como gasto para ${nombreMes(mes)}`
+  );
+
+  return pagosRealizados;
+}
+
+async function notificarPagosRegistrados(
+  pagos: {
+    usuario: string;
+    medio: string;
+    monto: number;
+  }[]
+) {
+  if (
+    !pagos.length ||
+    !ALLOWED_CHAT_IDS.length
+  ) {
+    return;
+  }
+
+  let mensaje =
+    `💳 Se registraron los pagos de tarjeta de ${nombreMes(
+      mesActual()
+    )}:\n`;
+
+  for (const pago of pagos) {
+    mensaje +=
+      `\n${pago.usuario} — ${pago.medio}: ${formatoPesos(
+        pago.monto
+      )}`;
+  }
+
+  for (const chatId of ALLOWED_CHAT_IDS) {
+    try {
+      await bot.telegram.sendMessage(
+        chatId,
+        mensaje
+      );
+    } catch (error) {
+      console.error(
+        `⚠️ No pude avisar a ${chatId} sobre pagos de tarjeta:`,
+        error
+      );
+    }
+  }
+}
+
 async function guardarCuotas(
   ctx: any,
   sesion: Extract<
@@ -1299,7 +1602,7 @@ async function guardarCuotas(
     },
   });
 
-  await reconstruirProyeccionHorizontal();
+  await actualizarProyeccionYPagos();
 
   const ultima =
     sumarMeses(
@@ -1389,81 +1692,55 @@ bot.action(
 // ======================================================
 // PROYECCIÓN EN TELEGRAM
 // ======================================================
+// Agrupa por tarjeta (usuario + medio de pago) y muestra los
+// próximos meses como columnas, así "BNA Máster — $xxxx — 6
+// cuotas" se suma automáticamente con el resto de las compras
+// de esa misma tarjeta en cada mes. Por defecto muestra los
+// próximos 6 meses; se puede pedir otra ventana con
+// "/proyeccion 3" (mínimo 1, máximo 12).
+
+const MESES_PROYECCION_DEFECTO = 6;
+const MESES_PROYECCION_MAXIMO = 12;
 
 bot.command(
   "proyeccion",
   async ctx => {
     cancelarSesion(ctx);
 
-    await reconstruirProyeccionHorizontal();
+    const argumento =
+      ctx.message.text
+        .split(/\s+/)[1];
 
-    const filas =
+    const pedido =
+      Number(argumento);
+
+    const cantidadMeses =
+      Number.isInteger(pedido) &&
+      pedido > 0
+        ? Math.min(
+            pedido,
+            MESES_PROYECCION_MAXIMO
+          )
+        : MESES_PROYECCION_DEFECTO;
+
+    // Leemos cuotas_datos una sola vez y la reusamos tanto para
+    // refrescar la hoja "proyeccion" como para armar el mensaje.
+    const cuotas =
       await obtenerCuotasDatos();
 
-    const desde =
-      mesActual();
+    await reconstruirProyeccionHorizontal(
+      cuotas
+    );
 
     const meses =
-      new Map<
-        string,
-        Map<string, number>
-      >();
-
-    for (const fila of filas) {
-      const usuario =
-        String(fila[1] ?? "").trim();
-
-      const medio =
-        String(fila[2] ?? "").trim();
-
-      const mes =
-        String(fila[4] ?? "").trim();
-
-      const monto =
-        numeroDesdeSheet(fila[6]);
-
-      if (
-        !usuario ||
-        !medio ||
-        !mes ||
-        !Number.isFinite(monto)
-      ) {
-        continue;
-      }
-
-      if (mes <= desde) {
-        continue;
-      }
-
-      if (!meses.has(mes)) {
-        meses.set(
-          mes,
-          new Map<string, number>()
-        );
-      }
-
-      const medios =
-        meses.get(mes)!;
-
-      const clave =
-        `${usuario} — ${medio}`;
-
-      medios.set(
-        clave,
-        (medios.get(clave) ?? 0) +
-          monto
+      construirMesesAdelante(
+        cantidadMeses
       );
-    }
 
-    const ordenados = [
-      ...meses.entries(),
-    ]
-      .sort(([a], [b]) =>
-        a.localeCompare(b)
-      )
-      .slice(0, 6);
+    const { agrupado } =
+      agruparCuotas(cuotas, meses);
 
-    if (!ordenados.length) {
+    if (!agrupado.size) {
       await ctx.reply(
         "No hay pagos proyectados."
       );
@@ -1471,37 +1748,76 @@ bot.command(
       return;
     }
 
+    const gruposOrdenados =
+      ordenarPorUsuarioYMedio([
+        ...agrupado.values(),
+      ]);
+
+    const totalPorMes =
+      new Map<string, number>();
+
+    let totalGeneral = 0;
+
     let mensaje =
-      "📆 Próximos pagos\n";
+      `📆 Proyección de pagos — próximos ${cantidadMeses} ${
+        cantidadMeses === 1
+          ? "mes"
+          : "meses"
+      }\n`;
 
     for (
-      const [mes, medios]
-      of ordenados
+      const grupo
+      of gruposOrdenados
     ) {
-      let total = 0;
+      let totalTarjeta = 0;
 
       mensaje +=
-        `\n📅 ${nombreMes(
-          mes
-        )}`;
+        `\n💳 ${grupo.usuario} — ${grupo.medio}`;
 
-      for (
-        const [medio, monto]
-        of medios
-      ) {
-        total += monto;
+      for (const mes of meses) {
+        const monto =
+          grupo.montos.get(mes) ?? 0;
 
-        mensaje +=
-          `\n• ${medio}: ${formatoPesos(
+        totalTarjeta += monto;
+
+        totalPorMes.set(
+          mes,
+          (totalPorMes.get(mes) ?? 0) +
             monto
-          )}`;
+        );
+
+        if (monto > 0) {
+          mensaje +=
+            `\n   ${nombreMesCorto(
+              mes
+            )}: ${formatoPesos(monto)}`;
+        }
       }
 
       mensaje +=
-        `\nTotal familiar: ${formatoPesos(
-          total
+        `\n   Subtotal: ${formatoPesos(
+          totalTarjeta
         )}\n`;
+
+      totalGeneral += totalTarjeta;
     }
+
+    mensaje +=
+      `\n📊 Total familiar por mes`;
+
+    for (const mes of meses) {
+      mensaje +=
+        `\n${nombreMesCorto(
+          mes
+        )}: ${formatoPesos(
+          totalPorMes.get(mes) ?? 0
+        )}`;
+    }
+
+    mensaje +=
+      `\n\n💰 Total proyectado: ${formatoPesos(
+        totalGeneral
+      )}`;
 
     await ctx.reply(mensaje);
   }
@@ -1623,10 +1939,18 @@ async function procesarSesion(
       sesion.paso ===
       "categoria"
     ) {
-      sesion.categoria =
-        normalizarCategoria(
-          texto
+      const categoria =
+        normalizarCategoria(texto);
+
+      if (!categoria) {
+        await ctx.reply(
+          `❌ No reconozco esa categoría. Elegí una de estas:\n${listaCategorias()}`
         );
+
+        return true;
+      }
+
+      sesion.categoria = categoria;
 
       sesion.paso =
         "monto";
@@ -1952,6 +2276,14 @@ bot.on(
           .join(" ")
       );
 
+    if (!categoria) {
+      await ctx.reply(
+        `❌ No reconozco esa categoría. Elegí una de estas:\n${listaCategorias()}`
+      );
+
+      return;
+    }
+
     const usuario =
       usuarioTelegram(ctx);
 
@@ -2001,6 +2333,21 @@ bot.on(
 );
 
 // ======================================================
+// CATEGORÍAS DISPONIBLES
+// ======================================================
+
+bot.command(
+  "categorias",
+  async ctx => {
+    cancelarSesion(ctx);
+
+    await ctx.reply(
+      `🏷️ Categorías reconocidas:\n${listaCategorias()}`
+    );
+  }
+);
+
+// ======================================================
 // ID (temporal, para configurar ALLOWED_CHAT_IDS)
 // ======================================================
 
@@ -2035,7 +2382,8 @@ bot.command(
       `/mes — gastos del mes\n` +
       `/balance — balance familiar\n` +
       `/presupuestos — ver presupuestos\n` +
-      `/proyeccion — próximos pagos\n` +
+      `/proyeccion [meses] — próximos pagos por tarjeta (default 6)\n` +
+      `/categorias — categorías reconocidas\n` +
       `/ultimo — último gasto\n\n` +
 
       `✏️ Cargar:\n` +
@@ -2107,20 +2455,41 @@ http
   );
 
 // ======================================================
-// REFRESCO AUTOMÁTICO DE PROYECCIÓN
+// REFRESCO AUTOMÁTICO DE PROYECCIÓN Y PAGOS DE TARJETA
 // ======================================================
+// Lee cuotas_datos una sola vez, refresca la hoja "proyeccion" y
+// registra en "gastos" el pago del mes de cada tarjeta que todavía
+// no se hubiera volcado (ver registrarPagosDelMes).
+
+async function actualizarProyeccionYPagos() {
+  const cuotas = await obtenerCuotasDatos();
+
+  await reconstruirProyeccionHorizontal(
+    cuotas
+  );
+
+  const pagos = await registrarPagosDelMes(
+    cuotas
+  );
+
+  if (pagos.length) {
+    await notificarPagosRegistrados(pagos);
+  }
+
+  return pagos;
+}
 
 setInterval(
   async () => {
     try {
-      await reconstruirProyeccionHorizontal();
+      await actualizarProyeccionYPagos();
 
       console.log(
-        "🔄 Proyección actualizada automáticamente"
+        "🔄 Proyección y pagos de tarjeta actualizados automáticamente"
       );
     } catch (error) {
       console.error(
-        "⚠️ Error actualizando proyección automáticamente:",
+        "⚠️ Error actualizando proyección/pagos automáticamente:",
         error
       );
     }
@@ -2138,10 +2507,13 @@ async function iniciar() {
   await actualizarResumen();
 
   try {
-    await reconstruirProyeccionHorizontal();
+    // Por si el bot estuvo apagado cuando cambió el mes, al
+    // arrancar también chequeamos si hay pagos de tarjeta
+    // pendientes de volcar a "gastos".
+    await actualizarProyeccionYPagos();
   } catch (error) {
     console.error(
-      "⚠️ No pude reconstruir la proyección al iniciar:",
+      "⚠️ No pude reconstruir la proyección / registrar pagos al iniciar:",
       error
     );
   }
@@ -2195,6 +2567,12 @@ async function iniciar() {
     },
     {
       command:
+        "categorias",
+      description:
+        "Ver categorías reconocidas",
+    },
+    {
+      command:
         "ultimo",
       description:
         "Último gasto",
@@ -2225,6 +2603,18 @@ async function iniciar() {
     "🤖 Esperancito está funcionando"
   );
 }
+
+// Apagado prolijo: si no le avisamos a Telegraf que pare el
+// polling antes de que Render mate el proceso (redeploy, restart),
+// la próxima instancia puede chocar con la anterior y Telegram
+// devuelve error 409 (conflicto de getUpdates).
+process.once("SIGINT", () =>
+  bot.stop("SIGINT")
+);
+
+process.once("SIGTERM", () =>
+  bot.stop("SIGTERM")
+);
 
 iniciar().catch(
   error => {
