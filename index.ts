@@ -251,15 +251,43 @@ function nombreMes(mes: string) {
   });
 }
 
+function nombreMesCorto(mes: string) {
+  const [anio, numeroMes] = mes.split("-").map(Number);
+
+  const texto = new Date(
+    Date.UTC(anio, numeroMes - 1, 1)
+  ).toLocaleDateString("es-AR", {
+    month: "short",
+    timeZone: "UTC",
+  });
+
+  const limpio = texto
+    .replace(".", "")
+    .trim();
+
+  return (
+    limpio.charAt(0).toUpperCase() +
+    limpio.slice(1)
+  );
+}
+
 function claveSesion(ctx: any) {
   return `${ctx.chat.id}:${ctx.from.id}`;
 }
 
-function normalizarMedioPago(texto: string) {
+function quitarAcentos(texto: string) {
   return texto
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function normalizarMedioPago(texto: string) {
+  return quitarAcentos(
+    texto
+      .trim()
+      .replace(/\s+/g, " ")
+      .toLowerCase()
+  );
 }
 // ======================================================
 // PESTAÑAS
@@ -975,37 +1003,51 @@ async function obtenerCuotasDatos() {
   );
 }
 
-async function reconstruirProyeccionHorizontal() {
-  const cuotas =
-    await obtenerCuotasDatos();
-
+// Próximos `cantidad` meses, empezando por el mes que sigue al actual.
+// Ej: si hoy es agosto 2026, construirMesesAdelante(3) =>
+// [2026-09, 2026-10, 2026-11]
+function construirMesesAdelante(
+  cantidad: number
+) {
   const meses: string[] = [];
 
-  // Mostramos desde el mes siguiente y 12 meses hacia adelante
-  for (let i = 1; i <= 12; i++) {
+  for (let i = 1; i <= cantidad; i++) {
     meses.push(
       sumarMeses(mesActual(), i)
     );
   }
 
-  // usuario|medioPago => nombre visible + montos por mes
+  return meses;
+}
+
+type GrupoTarjeta = {
+  usuario: string;
+  medio: string;
+  montos: Map<string, number>;
+};
+
+type DetalleCompra = GrupoTarjeta & {
+  concepto: string;
+};
+
+// Toma las filas de cuotas_datos y las agrupa por usuario+tarjeta
+// (sumando todas las cuotas que caen en el mismo mes), y además
+// por usuario+tarjeta+concepto para el detalle de cada compra.
+// El agrupado por tarjeta usa el medio de pago normalizado (sin
+// mayúsculas/acentos) como clave, así "BNA Máster" y "bna master"
+// se suman juntos en vez de aparecer como tarjetas distintas.
+function agruparCuotas(
+  cuotas: any[][],
+  meses: string[]
+) {
   const agrupado = new Map<
     string,
-    {
-      usuario: string;
-      medio: string;
-      montos: Map<string, number>;
-    }
+    GrupoTarjeta
   >();
 
   const detalleCompras = new Map<
     string,
-    {
-      usuario: string;
-      medio: string;
-      concepto: string;
-      montos: Map<string, number>;
-    }
+    DetalleCompra
   >();
 
   for (const fila of cuotas) {
@@ -1043,7 +1085,7 @@ async function reconstruirProyeccionHorizontal() {
       continue;
     }
 
-    // Solo mostramos los 12 meses de la vista
+    // Solo mostramos los meses de la ventana pedida
     if (!meses.includes(mes)) {
       continue;
     }
@@ -1093,18 +1135,16 @@ async function reconstruirProyeccionHorizontal() {
     );
   }
 
-  const encabezadoResumen = [
-    "Usuario / Tarjeta",
-    ...meses.map(nombreMes),
-  ];
+  return { agrupado, detalleCompras };
+}
 
-  const filasResumen: any[][] = [
-    encabezadoResumen,
-  ];
-
-  const gruposOrdenados = [
-    ...agrupado.values(),
-  ].sort((a, b) => {
+function ordenarPorUsuarioYMedio<
+  T extends {
+    usuario: string;
+    medio: string;
+  }
+>(items: T[]) {
+  return [...items].sort((a, b) => {
     const usuarioCompare =
       a.usuario.localeCompare(
         b.usuario,
@@ -1120,6 +1160,38 @@ async function reconstruirProyeccionHorizontal() {
       "es"
     );
   });
+}
+
+// Reconstruye la pestaña "proyeccion" con los próximos 12 meses en
+// columnas. Si ya se leyeron las filas de cuotas_datos en otro lado
+// (por ejemplo desde /proyeccion) se pueden pasar en `cuotasPrecargadas`
+// para no leer la hoja dos veces.
+async function reconstruirProyeccionHorizontal(
+  cuotasPrecargadas?: any[][]
+) {
+  const cuotas =
+    cuotasPrecargadas ??
+    (await obtenerCuotasDatos());
+
+  const meses =
+    construirMesesAdelante(12);
+
+  const { agrupado, detalleCompras } =
+    agruparCuotas(cuotas, meses);
+
+  const encabezadoResumen = [
+    "Usuario / Tarjeta",
+    ...meses.map(nombreMes),
+  ];
+
+  const filasResumen: any[][] = [
+    encabezadoResumen,
+  ];
+
+  const gruposOrdenados =
+    ordenarPorUsuarioYMedio([
+      ...agrupado.values(),
+    ]);
 
   for (const grupo of gruposOrdenados) {
     filasResumen.push([
@@ -1389,81 +1461,55 @@ bot.action(
 // ======================================================
 // PROYECCIÓN EN TELEGRAM
 // ======================================================
+// Agrupa por tarjeta (usuario + medio de pago) y muestra los
+// próximos meses como columnas, así "BNA Máster — $xxxx — 6
+// cuotas" se suma automáticamente con el resto de las compras
+// de esa misma tarjeta en cada mes. Por defecto muestra los
+// próximos 6 meses; se puede pedir otra ventana con
+// "/proyeccion 3" (mínimo 1, máximo 12).
+
+const MESES_PROYECCION_DEFECTO = 6;
+const MESES_PROYECCION_MAXIMO = 12;
 
 bot.command(
   "proyeccion",
   async ctx => {
     cancelarSesion(ctx);
 
-    await reconstruirProyeccionHorizontal();
+    const argumento =
+      ctx.message.text
+        .split(/\s+/)[1];
 
-    const filas =
+    const pedido =
+      Number(argumento);
+
+    const cantidadMeses =
+      Number.isInteger(pedido) &&
+      pedido > 0
+        ? Math.min(
+            pedido,
+            MESES_PROYECCION_MAXIMO
+          )
+        : MESES_PROYECCION_DEFECTO;
+
+    // Leemos cuotas_datos una sola vez y la reusamos tanto para
+    // refrescar la hoja "proyeccion" como para armar el mensaje.
+    const cuotas =
       await obtenerCuotasDatos();
 
-    const desde =
-      mesActual();
+    await reconstruirProyeccionHorizontal(
+      cuotas
+    );
 
     const meses =
-      new Map<
-        string,
-        Map<string, number>
-      >();
-
-    for (const fila of filas) {
-      const usuario =
-        String(fila[1] ?? "").trim();
-
-      const medio =
-        String(fila[2] ?? "").trim();
-
-      const mes =
-        String(fila[4] ?? "").trim();
-
-      const monto =
-        numeroDesdeSheet(fila[6]);
-
-      if (
-        !usuario ||
-        !medio ||
-        !mes ||
-        !Number.isFinite(monto)
-      ) {
-        continue;
-      }
-
-      if (mes <= desde) {
-        continue;
-      }
-
-      if (!meses.has(mes)) {
-        meses.set(
-          mes,
-          new Map<string, number>()
-        );
-      }
-
-      const medios =
-        meses.get(mes)!;
-
-      const clave =
-        `${usuario} — ${medio}`;
-
-      medios.set(
-        clave,
-        (medios.get(clave) ?? 0) +
-          monto
+      construirMesesAdelante(
+        cantidadMeses
       );
-    }
 
-    const ordenados = [
-      ...meses.entries(),
-    ]
-      .sort(([a], [b]) =>
-        a.localeCompare(b)
-      )
-      .slice(0, 6);
+    const { agrupado } =
+      agruparCuotas(cuotas, meses);
 
-    if (!ordenados.length) {
+    if (!agrupado.size) {
       await ctx.reply(
         "No hay pagos proyectados."
       );
@@ -1471,37 +1517,76 @@ bot.command(
       return;
     }
 
+    const gruposOrdenados =
+      ordenarPorUsuarioYMedio([
+        ...agrupado.values(),
+      ]);
+
+    const totalPorMes =
+      new Map<string, number>();
+
+    let totalGeneral = 0;
+
     let mensaje =
-      "📆 Próximos pagos\n";
+      `📆 Proyección de pagos — próximos ${cantidadMeses} ${
+        cantidadMeses === 1
+          ? "mes"
+          : "meses"
+      }\n`;
 
     for (
-      const [mes, medios]
-      of ordenados
+      const grupo
+      of gruposOrdenados
     ) {
-      let total = 0;
+      let totalTarjeta = 0;
 
       mensaje +=
-        `\n📅 ${nombreMes(
-          mes
-        )}`;
+        `\n💳 ${grupo.usuario} — ${grupo.medio}`;
 
-      for (
-        const [medio, monto]
-        of medios
-      ) {
-        total += monto;
+      for (const mes of meses) {
+        const monto =
+          grupo.montos.get(mes) ?? 0;
 
-        mensaje +=
-          `\n• ${medio}: ${formatoPesos(
+        totalTarjeta += monto;
+
+        totalPorMes.set(
+          mes,
+          (totalPorMes.get(mes) ?? 0) +
             monto
-          )}`;
+        );
+
+        if (monto > 0) {
+          mensaje +=
+            `\n   ${nombreMesCorto(
+              mes
+            )}: ${formatoPesos(monto)}`;
+        }
       }
 
       mensaje +=
-        `\nTotal familiar: ${formatoPesos(
-          total
+        `\n   Subtotal: ${formatoPesos(
+          totalTarjeta
         )}\n`;
+
+      totalGeneral += totalTarjeta;
     }
+
+    mensaje +=
+      `\n📊 Total familiar por mes`;
+
+    for (const mes of meses) {
+      mensaje +=
+        `\n${nombreMesCorto(
+          mes
+        )}: ${formatoPesos(
+          totalPorMes.get(mes) ?? 0
+        )}`;
+    }
+
+    mensaje +=
+      `\n\n💰 Total proyectado: ${formatoPesos(
+        totalGeneral
+      )}`;
 
     await ctx.reply(mensaje);
   }
@@ -2035,7 +2120,7 @@ bot.command(
       `/mes — gastos del mes\n` +
       `/balance — balance familiar\n` +
       `/presupuestos — ver presupuestos\n` +
-      `/proyeccion — próximos pagos\n` +
+      `/proyeccion [meses] — próximos pagos por tarjeta (default 6)\n` +
       `/ultimo — último gasto\n\n` +
 
       `✏️ Cargar:\n` +
@@ -2225,6 +2310,18 @@ async function iniciar() {
     "🤖 Esperancito está funcionando"
   );
 }
+
+// Apagado prolijo: si no le avisamos a Telegraf que pare el
+// polling antes de que Render mate el proceso (redeploy, restart),
+// la próxima instancia puede chocar con la anterior y Telegram
+// devuelve error 409 (conflicto de getUpdates).
+process.once("SIGINT", () =>
+  bot.stop("SIGINT")
+);
+
+process.once("SIGTERM", () =>
+  bot.stop("SIGTERM")
+);
 
 iniciar().catch(
   error => {
