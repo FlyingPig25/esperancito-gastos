@@ -260,6 +260,44 @@ function normalizarFecha(valor: any) {
   return texto;
 }
 
+// Igual que normalizarFecha, pero para columnas "Mes" (formato
+// YYYY-MM: ingresos, presupuestos, cuotas_datos, cuotas_registros,
+// resumenes_enviados). Google Sheets, con USER_ENTERED, puede
+// reconocer un texto como "2026-08" como fecha y convertirlo a un
+// número de serie al guardarlo — si después se lo compara como
+// String(valor) sin pasar por acá, nunca va a matchear "2026-08"
+// y esa fila queda invisible para /balance, /presupuestos, la
+// proyección de cuotas, etc. aunque el dato esté bien cargado.
+function normalizarMes(valor: any) {
+  if (valor === undefined || valor === null) {
+    return "";
+  }
+
+  if (typeof valor === "number") {
+    return serialSheetsAFecha(
+      valor
+    ).slice(0, 7);
+  }
+
+  const texto = String(valor).trim();
+
+  if (/^\d{4}-\d{2}$/.test(texto)) {
+    return texto;
+  }
+
+  // Por si quedó guardada como fecha completa (texto) en vez de
+  // como serial numérico.
+  const fecha = normalizarFecha(texto);
+
+  if (
+    /^\d{4}-\d{2}-\d{2}$/.test(fecha)
+  ) {
+    return fecha.slice(0, 7);
+  }
+
+  return texto;
+}
+
 function normalizarHora(valor: any) {
   if (typeof valor !== "number") {
     return String(valor ?? "");
@@ -935,7 +973,7 @@ bot.command("balance", async ctx => {
     new Map<string, number>();
 
   for (const fila of ingresos) {
-    if (String(fila[0]) !== mes) {
+    if (normalizarMes(fila[0]) !== mes) {
       continue;
     }
 
@@ -1068,7 +1106,8 @@ bot.command(
     const actuales =
       presupuestos.filter(
         fila =>
-          String(fila[0]) === mes
+          normalizarMes(fila[0]) ===
+          mes
       );
 
     if (!actuales.length) {
@@ -1212,7 +1251,7 @@ function agruparCuotas(
       String(conceptoRaw ?? "").trim();
 
     const mes =
-      String(mesRaw ?? "").trim();
+      normalizarMes(mesRaw);
 
     const monto =
       numeroDesdeSheet(montoRaw);
@@ -1489,7 +1528,7 @@ async function registrarPagosDelMes(
   const yaRegistrados = new Set(
     registrados.map(fila =>
       claveRegistroPago(
-        String(fila[0] ?? ""),
+        normalizarMes(fila[0]),
         String(fila[1] ?? ""),
         String(fila[2] ?? "")
       )
@@ -1666,6 +1705,19 @@ async function obtenerResumenesEnviados() {
   );
 }
 
+// El "Período" es "YYYY-MM" para un resumen Mensual o "YYYY-MM-DD"
+// (el lunes de la semana) para uno Semanal — mismo riesgo de que
+// Sheets lo haya guardado como fecha, así que se normaliza según
+// el formato que se espera comparar.
+function normalizarPeriodo(
+  valor: any,
+  periodoEsperado: string
+) {
+  return periodoEsperado.length === 7
+    ? normalizarMes(valor)
+    : normalizarFecha(valor);
+}
+
 async function yaEnviadoResumen(
   tipo: string,
   periodo: string
@@ -1676,7 +1728,10 @@ async function yaEnviadoResumen(
   return filas.some(
     fila =>
       String(fila[0]) === tipo &&
-      String(fila[1]) === periodo
+      normalizarPeriodo(
+        fila[1],
+        periodo
+      ) === periodo
   );
 }
 
@@ -1761,7 +1816,7 @@ async function generarResumenMensual() {
   >();
 
   for (const fila of ingresos) {
-    if (String(fila[0]) !== mes) {
+    if (normalizarMes(fila[0]) !== mes) {
       continue;
     }
 
@@ -2363,7 +2418,7 @@ async function procesarSesion(
     const filaExistente =
       filas.findIndex(
         fila =>
-          String(fila[0]) ===
+          normalizarMes(fila[0]) ===
             mesActual() &&
           String(fila[1]) ===
             sesion.categoria
