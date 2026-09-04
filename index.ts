@@ -114,6 +114,25 @@ const aliases: Record<string, string> = {
   gas: "Servicios",
   agua: "Servicios",
   internet: "Servicios",
+  telefonia: "Servicios",
+  telefono: "Servicios",
+  celular: "Servicios",
+  electricidad: "Servicios",
+
+  auto: "Automóvil",
+  automovil: "Automóvil",
+  coche: "Automóvil",
+  mecanico: "Automóvil",
+  taller: "Automóvil",
+  seguro: "Automóvil",
+
+  psiquiatra: "Profesionales",
+  psicologia: "Profesionales",
+  psicologo: "Profesionales",
+  medico: "Profesionales",
+  medicos: "Profesionales",
+  honorarios: "Profesionales",
+  consulta: "Profesionales",
 
   impuestos: "Impuestos",
   rentas: "Impuestos",
@@ -3335,7 +3354,21 @@ setInterval(
 // ======================================================
 
 async function iniciar() {
-  await asegurarPestañas();
+  // Cada paso de arranque va en su propio try/catch: si alguno
+  // falla (por ejemplo un hipo transitorio de la API de Sheets),
+  // NO debe impedir que el bot llegue a conectarse a Telegram más
+  // abajo. Antes, un solo error acá tiraba abajo iniciar() entero
+  // y bot.launch() nunca se llamaba — el servidor HTTP seguía
+  // arriba (Render lo veía "vivo"), pero el bot no respondía
+  // absolutamente nada.
+  try {
+    await asegurarPestañas();
+  } catch (error) {
+    console.error(
+      "⚠️ No pude asegurar las pestañas de Sheets al iniciar:",
+      error
+    );
+  }
 
   try {
     // Migración única cuotas_datos -> tarjetas_detalle (no hace
@@ -3348,7 +3381,14 @@ async function iniciar() {
     );
   }
 
-  await actualizarResumen();
+  try {
+    await actualizarResumen();
+  } catch (error) {
+    console.error(
+      "⚠️ No pude actualizar el resumen al iniciar:",
+      error
+    );
+  }
 
   try {
     // Por si el bot estuvo apagado cuando cambió el mes, al
@@ -3374,6 +3414,7 @@ async function iniciar() {
     );
   }
 
+  try {
   await bot.telegram.setMyCommands([
     {
       command: "hoy",
@@ -3463,6 +3504,12 @@ async function iniciar() {
         "Ver tu chat id (para configurar ALLOWED_CHAT_IDS)",
     },
   ]);
+  } catch (error) {
+    console.error(
+      "⚠️ No pude actualizar el menú de comandos de Telegram:",
+      error
+    );
+  }
 
   await lanzarBotConReintentos();
 
