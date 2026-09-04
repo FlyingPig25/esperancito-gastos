@@ -72,7 +72,13 @@ const sheets = google.sheets({
 const aliases: Record<string, string> = {
   super: "Supermercado",
   supermercado: "Supermercado",
-  despensa: "Supermercado",
+
+  // Despensa es una categoría propia, independiente de Supermercado
+  // (no se debe fusionar con ella).
+  despensa: "Despensa",
+
+  libreria: "Librería",
+  papeleria: "Librería",
 
   tarjeta: "Tarjetas",
   tarjetas: "Tarjetas",
@@ -165,6 +171,36 @@ function normalizarCategoria(
 
 function listaCategorias() {
   return categoriasValidas.join(", ");
+}
+
+// ======================================================
+// INVERSIONES / AHORRO
+// ======================================================
+// Independiente del sistema de categorías de gastos: "Inversion
+// 200000" o "Ahorro 150000" no son un gasto de consumo, así que se
+// detectan antes de intentar resolver una categoría y van a su
+// propia pestaña ("inversiones"), no a "gastos".
+
+const tiposInversion: Record<
+  string,
+  string
+> = {
+  inversion: "Inversión",
+  inversiones: "Inversión",
+  ahorro: "Ahorro",
+  ahorros: "Ahorro",
+};
+
+function normalizarTipoInversion(
+  primeraPalabra: string
+): string | null {
+  return (
+    tiposInversion[
+      quitarAcentos(
+        primeraPalabra.toLowerCase()
+      )
+    ] ?? null
+  );
 }
 // ======================================================
 // UTILIDADES
@@ -517,7 +553,42 @@ const estructuras: Record<string, string[]> = {
     "Fecha de envío",
   ],
 
+  // Pestaña histórica: ya no se escribe más acá (reemplazada por
+  // tarjetas_acumulado), pero se deja declarada para no perder el
+  // encabezado ni el contenido que ya tenía.
   proyeccion: [
+    "Usuario / Tarjeta",
+  ],
+
+  inversiones: [
+    "Fecha",
+    "Hora",
+    "Usuario",
+    "Tipo",
+    "Concepto",
+    "Monto",
+  ],
+
+  // Fuente de verdad de las compras en cuotas: una fila por cada
+  // cuota individual. tarjetas_acumulado se reconstruye a partir de
+  // esta pestaña, nunca al revés.
+  tarjetas_detalle: [
+    "Fecha de carga",
+    "Usuario",
+    "Tarjeta / medio de pago",
+    "Item / concepto",
+    "Monto total compra",
+    "Cantidad de cuotas",
+    "Número de cuota",
+    "Mes de pago",
+    "Monto de cuota",
+  ],
+
+  // Tablero visual (se reconstruye entera cada vez, como
+  // "proyeccion" antes): usuario+tarjeta en filas, próximos meses en
+  // columnas. El encabezado es dinámico (depende del mes actual), así
+  // que se excluye del escritor de encabezado fijo de más abajo.
+  tarjetas_acumulado: [
     "Usuario / Tarjeta",
   ],
 };
@@ -552,7 +623,10 @@ async function asegurarPestañas() {
       console.log(`✅ Pestaña ${nombre} creada`);
     }
 
-    if (nombre !== "proyeccion") {
+    if (
+      nombre !== "proyeccion" &&
+      nombre !== "tarjetas_acumulado"
+    ) {
       await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
         range: `${nombre}!A1`,
@@ -1176,11 +1250,168 @@ bot.command("cuotas", async ctx => {
   );
 });
 
-async function obtenerCuotasDatos() {
+// tarjetas_detalle: Fecha de carga | Usuario | Tarjeta/medio de pago |
+// Item/concepto | Monto total compra | Cantidad de cuotas |
+// Número de cuota | Mes de pago | Monto de cuota  (9 columnas, A:I)
+async function obtenerTarjetasDetalle() {
   return obtenerFilas(
-    "cuotas_datos",
-    "A2:G"
+    "tarjetas_detalle",
+    "A2:I"
   );
+}
+
+// ======================================================
+// MIGRACIÓN cuotas_datos -> tarjetas_detalle
+// ======================================================
+// cuotas_datos (7 columnas: Fecha de carga, Usuario, Medio de
+// pago, Concepto, Mes, Cuota, Monto) se reemplaza por
+// tarjetas_detalle (9 columnas, con "Monto total compra" y
+// "Cantidad de cuotas" como columnas propias en vez de tener que
+// derivarlas). No se borra cuotas_datos: queda como archivo
+// histórico, intacto.
+//
+// Idempotencia: si tarjetas_detalle YA tiene alguna fila, se asume
+// que la migración ya se hizo (o que tarjetas_detalle ya se está
+// usando en producción) y no se toca nada. Así, reiniciar el bot
+// no duplica cuotas — la migración corre una única vez, la primera
+// vez que arranca con este código.
+async function migrarCuotasATarjetas() {
+  const yaMigrado =
+    await obtenerTarjetasDetalle();
+
+  if (yaMigrado.length > 0) {
+    return 0;
+  }
+
+  const cuotasViejas =
+    await obtenerFilas(
+      "cuotas_datos",
+      "A2:G"
+    );
+
+  if (!cuotasViejas.length) {
+    return 0;
+  }
+
+  // cuotas_datos no tenía una columna "Monto total compra": hay
+  // que reconstruirla sumando todas las cuotas de una misma
+  // compra (mismo usuario + tarjeta + concepto + fecha de carga).
+  const totalPorCompra = new Map<
+    string,
+    number
+  >();
+
+  for (const fila of cuotasViejas) {
+    const fechaCarga =
+      normalizarFecha(fila[0]);
+
+    const usuario =
+      String(fila[1] ?? "").trim() ||
+      "Sin usuario (migrado)";
+
+    const medio =
+      String(fila[2] ?? "").trim();
+
+    const concepto =
+      String(fila[3] ?? "").trim();
+
+    const monto =
+      numeroDesdeSheet(fila[6]);
+
+    if (!Number.isFinite(monto)) {
+      continue;
+    }
+
+    const claveCompra = `${fechaCarga}|${usuario}|${medio}|${concepto}`;
+
+    totalPorCompra.set(
+      claveCompra,
+      (totalPorCompra.get(
+        claveCompra
+      ) ?? 0) + monto
+    );
+  }
+
+  const filasNuevas: any[][] = [];
+
+  for (const fila of cuotasViejas) {
+    const fechaCarga =
+      normalizarFecha(fila[0]);
+
+    const usuario =
+      String(fila[1] ?? "").trim() ||
+      "Sin usuario (migrado)";
+
+    const medio =
+      String(fila[2] ?? "").trim();
+
+    const concepto =
+      String(fila[3] ?? "").trim();
+
+    const mes = normalizarMes(
+      fila[4]
+    );
+
+    const numeroCuota = String(
+      fila[5] ?? ""
+    ).trim();
+
+    const monto = numeroDesdeSheet(
+      fila[6]
+    );
+
+    if (
+      !medio ||
+      !mes ||
+      !Number.isFinite(monto)
+    ) {
+      continue;
+    }
+
+    const claveCompra = `${fechaCarga}|${usuario}|${medio}|${concepto}`;
+
+    const montoTotalCompra =
+      totalPorCompra.get(
+        claveCompra
+      ) ?? monto;
+
+    const cantidadCuotas =
+      Number(
+        numeroCuota.split("/")[1]
+      ) || 1;
+
+    filasNuevas.push([
+      fechaCarga,
+      usuario,
+      medio,
+      concepto,
+      montoTotalCompra,
+      cantidadCuotas,
+      numeroCuota,
+      mes,
+      monto,
+    ]);
+  }
+
+  if (!filasNuevas.length) {
+    return 0;
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "tarjetas_detalle!A:I",
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: filasNuevas,
+    },
+  });
+
+  console.log(
+    `✅ Migradas ${filasNuevas.length} cuota(s) de cuotas_datos a tarjetas_detalle`
+  );
+
+  return filasNuevas.length;
 }
 
 // Próximos `cantidad` meses, empezando por el mes que sigue al actual.
@@ -1210,12 +1441,14 @@ type DetalleCompra = GrupoTarjeta & {
   concepto: string;
 };
 
-// Toma las filas de cuotas_datos y las agrupa por usuario+tarjeta
+// Toma las filas de tarjetas_detalle y las agrupa por usuario+tarjeta
 // (sumando todas las cuotas que caen en el mismo mes), y además
 // por usuario+tarjeta+concepto para el detalle de cada compra.
 // El agrupado por tarjeta usa el medio de pago normalizado (sin
 // mayúsculas/acentos) como clave, así "BNA Máster" y "bna master"
-// se suman juntos en vez de aparecer como tarjetas distintas.
+// se suman juntos en vez de aparecer como tarjetas distintas. Cada
+// tarjeta se discrimina por USUARIO + MEDIO: "Visa BNA" de Joaquín
+// y "Visa BNA" de Romina son dos filas distintas.
 function agruparCuotas(
   cuotas: any[][],
   meses: string[]
@@ -1236,8 +1469,10 @@ function agruparCuotas(
       usuarioRaw,
       medioRaw,
       conceptoRaw,
-      mesRaw,
       ,
+      ,
+      ,
+      mesRaw,
       montoRaw,
     ] = fila;
 
@@ -1342,22 +1577,27 @@ function ordenarPorUsuarioYMedio<
   });
 }
 
-// Reconstruye la pestaña "proyeccion" con los próximos 12 meses en
-// columnas. Si ya se leyeron las filas de cuotas_datos en otro lado
-// (por ejemplo desde /proyeccion) se pueden pasar en `cuotasPrecargadas`
-// para no leer la hoja dos veces.
-async function reconstruirProyeccionHorizontal(
+// Reconstruye la pestaña "tarjetas_acumulado" (tablero visual) con
+// los próximos 12 meses en columnas, a partir de tarjetas_detalle
+// (la fuente de verdad). Si ya se leyeron las filas de
+// tarjetas_detalle en otro lado (por ejemplo desde /proyeccion) se
+// pueden pasar en `cuotasPrecargadas` para no leer la hoja dos veces.
+// El primer mes visible es siempre "el que viene", así que el
+// tablero corre solo hacia adelante con el paso del tiempo.
+async function reconstruirTarjetasAcumulado(
   cuotasPrecargadas?: any[][]
 ) {
   const cuotas =
     cuotasPrecargadas ??
-    (await obtenerCuotasDatos());
+    (await obtenerTarjetasDetalle());
 
   const meses =
     construirMesesAdelante(12);
 
-  const { agrupado, detalleCompras } =
-    agruparCuotas(cuotas, meses);
+  const { agrupado } = agruparCuotas(
+    cuotas,
+    meses
+  );
 
   const encabezadoResumen = [
     "Usuario / Tarjeta",
@@ -1404,63 +1644,14 @@ async function reconstruirProyeccionHorizontal(
     ),
   ]);
 
-  // Separador + detalle de compras
-  filasResumen.push([]);
-  filasResumen.push([
-    "DETALLE DE COMPRAS",
-    ...meses.map(nombreMes),
-  ]);
-
-  const detallesOrdenados = [
-    ...detalleCompras.values(),
-  ].sort((a, b) => {
-    const usuarioCompare =
-      a.usuario.localeCompare(
-        b.usuario,
-        "es"
-      );
-
-    if (usuarioCompare !== 0) {
-      return usuarioCompare;
-    }
-
-    const medioCompare =
-      a.medio.localeCompare(
-        b.medio,
-        "es"
-      );
-
-    if (medioCompare !== 0) {
-      return medioCompare;
-    }
-
-    return a.concepto.localeCompare(
-      b.concepto,
-      "es"
-    );
-  });
-
-  for (
-    const detalle
-    of detallesOrdenados
-  ) {
-    filasResumen.push([
-      `${detalle.usuario} — ${detalle.medio} — ${detalle.concepto}`,
-      ...meses.map(
-        mes =>
-          detalle.montos.get(mes) ?? 0
-      ),
-    ]);
-  }
-
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SPREADSHEET_ID,
-    range: "proyeccion!A:Z",
+    range: "tarjetas_acumulado!A:Z",
   });
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
-    range: "proyeccion!A1",
+    range: "tarjetas_acumulado!A1",
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: filasResumen,
@@ -1468,7 +1659,7 @@ async function reconstruirProyeccionHorizontal(
   });
 
   console.log(
-    "✅ Proyección horizontal actualizada"
+    "✅ tarjetas_acumulado actualizado"
   );
 }
 
@@ -1511,7 +1702,7 @@ async function registrarPagosDelMes(
 
   const cuotas =
     cuotasPrecargadas ??
-    (await obtenerCuotasDatos());
+    (await obtenerTarjetasDetalle());
 
   const { agrupado } = agruparCuotas(
     cuotas,
@@ -2014,15 +2205,17 @@ async function guardarCuotas(
       usuario,
       medio,
       concepto,
-      sumarMeses(primera, i),
+      total,
+      cantidad,
       `${i + 1}/${cantidad}`,
+      sumarMeses(primera, i),
       centavos / 100,
     ]);
   }
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: "cuotas_datos!A:G",
+    range: "tarjetas_detalle!A:I",
     valueInputOption: "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
     requestBody: {
@@ -2030,13 +2223,18 @@ async function guardarCuotas(
     },
   });
 
-  await actualizarProyeccionYPagos();
+  await actualizarTarjetasYPagos();
 
   const ultima =
     sumarMeses(
       primera,
       cantidad - 1
     );
+
+  // Monto de la primera cuota (columna 8, índice 8), exacto — si la
+  // división no fue pareja, es la que puede tener +1 centavo.
+  const montoPrimeraCuota =
+    filas[0][8] as number;
 
   sesiones.delete(
     claveSesion(ctx)
@@ -2049,11 +2247,13 @@ async function guardarCuotas(
       )}\n` +
       `💳 ${medio}\n` +
       `👤 ${usuario}\n` +
-      `${cantidad} cuotas\n` +
-      `Primera: ${nombreMes(
+      `${cantidad} cuotas de ${formatoPesos(
+        montoPrimeraCuota
+      )}\n\n` +
+      `Primera cuota: ${nombreMes(
         primera
       )}\n` +
-      `Última: ${nombreMes(
+      `Última cuota: ${nombreMes(
         ultima
       )}`
   );
@@ -2120,12 +2320,12 @@ bot.action(
 // ======================================================
 // PROYECCIÓN EN TELEGRAM
 // ======================================================
-// Agrupa por tarjeta (usuario + medio de pago) y muestra los
-// próximos meses como columnas, así "BNA Máster — $xxxx — 6
-// cuotas" se suma automáticamente con el resto de las compras
-// de esa misma tarjeta en cada mes. Por defecto muestra los
-// próximos 6 meses; se puede pedir otra ventana con
-// "/proyeccion 3" (mínimo 1, máximo 12).
+// Agrupa por MES y, dentro de cada mes, por USUARIO y tarjeta —
+// así se ve de un vistazo qué le vence a cada uno cada mes. Por
+// defecto muestra los próximos 6 meses (para no generar un mensaje
+// gigante); se puede pedir otra ventana con "/proyeccion 3"
+// (mínimo 1, máximo 12). La pestaña tarjetas_acumulado siempre
+// muestra 12 meses.
 
 const MESES_PROYECCION_DEFECTO = 6;
 const MESES_PROYECCION_MAXIMO = 12;
@@ -2151,12 +2351,13 @@ bot.command(
           )
         : MESES_PROYECCION_DEFECTO;
 
-    // Leemos cuotas_datos una sola vez y la reusamos tanto para
-    // refrescar la hoja "proyeccion" como para armar el mensaje.
+    // Leemos tarjetas_detalle una sola vez y la reusamos tanto
+    // para refrescar la hoja "tarjetas_acumulado" como para armar
+    // el mensaje.
     const cuotas =
-      await obtenerCuotasDatos();
+      await obtenerTarjetasDetalle();
 
-    await reconstruirProyeccionHorizontal(
+    await reconstruirTarjetasAcumulado(
       cuotas
     );
 
@@ -2176,78 +2377,115 @@ bot.command(
       return;
     }
 
-    const gruposOrdenados =
-      ordenarPorUsuarioYMedio([
-        ...agrupado.values(),
-      ]);
+    const grupos = [
+      ...agrupado.values(),
+    ];
 
-    const totalPorMes =
-      new Map<string, number>();
+    const bloques: string[] = [
+      "📆 Próximos pagos",
+    ];
 
-    let totalGeneral = 0;
+    for (const mes of meses) {
+      const porUsuario = new Map<
+        string,
+        {
+          medio: string;
+          monto: number;
+        }[]
+      >();
 
-    let mensaje =
-      `📆 Proyección de pagos — próximos ${cantidadMeses} ${
-        cantidadMeses === 1
-          ? "mes"
-          : "meses"
-      }\n`;
+      let totalMes = 0;
 
-    for (
-      const grupo
-      of gruposOrdenados
-    ) {
-      let totalTarjeta = 0;
-
-      mensaje +=
-        `\n💳 ${grupo.usuario} — ${grupo.medio}`;
-
-      for (const mes of meses) {
+      for (const grupo of grupos) {
         const monto =
           grupo.montos.get(mes) ?? 0;
 
-        totalTarjeta += monto;
+        if (monto <= 0) continue;
 
-        totalPorMes.set(
-          mes,
-          (totalPorMes.get(mes) ?? 0) +
-            monto
-        );
+        totalMes += monto;
 
-        if (monto > 0) {
-          mensaje +=
-            `\n   ${nombreMesCorto(
-              mes
-            )}: ${formatoPesos(monto)}`;
+        if (
+          !porUsuario.has(
+            grupo.usuario
+          )
+        ) {
+          porUsuario.set(
+            grupo.usuario,
+            []
+          );
         }
+
+        porUsuario
+          .get(grupo.usuario)!
+          .push({
+            medio: grupo.medio,
+            monto,
+          });
       }
 
-      mensaje +=
-        `\n   Subtotal: ${formatoPesos(
-          totalTarjeta
-        )}\n`;
+      // Meses sin ningún pago pendiente no suman nada al mensaje.
+      if (totalMes <= 0) continue;
 
-      totalGeneral += totalTarjeta;
+      const bloqueMes: string[] = [
+        `📅 ${nombreMes(mes)}`,
+      ];
+
+      const usuariosOrdenados = [
+        ...porUsuario.entries(),
+      ].sort(([a], [b]) =>
+        a.localeCompare(b, "es")
+      );
+
+      for (const [
+        usuario,
+        items,
+      ] of usuariosOrdenados) {
+        const itemsOrdenados = [
+          ...items,
+        ].sort((a, b) =>
+          a.medio.localeCompare(
+            b.medio,
+            "es"
+          )
+        );
+
+        const lineas = [
+          usuario,
+          ...itemsOrdenados.map(
+            item =>
+              `• ${item.medio}: ${formatoPesos(
+                item.monto
+              )}`
+          ),
+        ];
+
+        bloqueMes.push(
+          lineas.join("\n")
+        );
+      }
+
+      bloqueMes.push(
+        `Total familiar: ${formatoPesos(
+          totalMes
+        )}`
+      );
+
+      bloques.push(
+        bloqueMes.join("\n\n")
+      );
     }
 
-    mensaje +=
-      `\n📊 Total familiar por mes`;
+    if (bloques.length === 1) {
+      await ctx.reply(
+        "No hay pagos proyectados."
+      );
 
-    for (const mes of meses) {
-      mensaje +=
-        `\n${nombreMesCorto(
-          mes
-        )}: ${formatoPesos(
-          totalPorMes.get(mes) ?? 0
-        )}`;
+      return;
     }
 
-    mensaje +=
-      `\n\n💰 Total proyectado: ${formatoPesos(
-        totalGeneral
-      )}`;
-
-    await ctx.reply(mensaje);
+    await ctx.reply(
+      bloques.join("\n\n")
+    );
   }
 );
 // CANCELAR
@@ -2508,6 +2746,27 @@ async function procesarSesion(
         monto;
 
       sesion.paso =
+        "medio";
+
+      sesiones.set(
+        clave,
+        sesion
+      );
+
+      await ctx.reply(
+        "¿Con qué tarjeta o medio de pago?"
+      );
+
+      return true;
+    }
+
+    if (
+      sesion.paso === "medio"
+    ) {
+      sesion.medio =
+        texto.trim();
+
+      sesion.paso =
         "cantidad";
 
       sesiones.set(
@@ -2547,27 +2806,6 @@ async function procesarSesion(
         cantidad;
 
       sesion.paso =
-        "medio";
-
-      sesiones.set(
-        clave,
-        sesion
-      );
-
-      await ctx.reply(
-        "¿Con qué tarjeta o medio de pago?"
-      );
-
-      return true;
-    }
-
-    if (
-      sesion.paso === "medio"
-    ) {
-      sesion.medio =
-        texto.trim();
-
-      sesion.paso =
         "concepto";
 
       sesiones.set(
@@ -2576,7 +2814,7 @@ async function procesarSesion(
       );
 
       await ctx.reply(
-        "¿Cuál es el concepto de la compra?"
+        "¿Qué compraste?"
       );
 
       return true;
@@ -2697,6 +2935,70 @@ bot.on(
       return;
     }
 
+    // Inversión/ahorro: "Inversion 200000", "Ahorro 150000", o con
+    // concepto en el medio ("Inversion Fondo comun 200000"). No es
+    // un gasto de consumo, así que no pasa por normalizarCategoria
+    // ni se mezcla con "gastos".
+    const tipoInversion =
+      normalizarTipoInversion(
+        partes[0]
+      );
+
+    if (tipoInversion) {
+      const concepto =
+        partes
+          .slice(1, -1)
+          .join(" ")
+          .trim() || tipoInversion;
+
+      const usuarioInversion =
+        usuarioTelegram(ctx);
+
+      try {
+        await sheets.spreadsheets.values.append({
+          spreadsheetId:
+            SPREADSHEET_ID,
+
+          range:
+            "inversiones!A:F",
+
+          valueInputOption:
+            "USER_ENTERED",
+
+          insertDataOption:
+            "INSERT_ROWS",
+
+          requestBody: {
+            values: [[
+              fechaArgentina(),
+              horaArgentina(),
+              usuarioInversion,
+              tipoInversion,
+              concepto,
+              monto,
+            ]],
+          },
+        });
+
+        await ctx.reply(
+          `✅ ${tipoInversion} — ${formatoPesos(
+            monto
+          )}\n${concepto}\n👤 ${usuarioInversion}`
+        );
+      } catch (error) {
+        console.error(
+          "❌ Error registrando inversión/ahorro:",
+          error
+        );
+
+        await ctx.reply(
+          "❌ No pude registrar la inversión/ahorro."
+        );
+      }
+
+      return;
+    }
+
     const categoria =
       normalizarCategoria(
         partes
@@ -2776,6 +3078,92 @@ bot.command(
 );
 
 // ======================================================
+// INVERSIONES / AHORRO
+// ======================================================
+
+bot.command(
+  "inversiones",
+  async ctx => {
+    cancelarSesion(ctx);
+
+    const mes = mesActual();
+
+    const filas =
+      await obtenerFilas(
+        "inversiones",
+        "A2:F"
+      );
+
+    let total = 0;
+
+    const porUsuario = new Map<
+      string,
+      number
+    >();
+
+    for (const fila of filas) {
+      const fecha =
+        normalizarFecha(fila[0]);
+
+      if (!fecha.startsWith(mes)) {
+        continue;
+      }
+
+      const usuario = String(
+        fila[2] ?? ""
+      );
+
+      const monto =
+        numeroDesdeSheet(fila[5]);
+
+      if (!Number.isFinite(monto)) {
+        continue;
+      }
+
+      total += monto;
+
+      porUsuario.set(
+        usuario,
+        (porUsuario.get(usuario) ??
+          0) + monto
+      );
+    }
+
+    if (total <= 0) {
+      await ctx.reply(
+        `Todavía no hay inversiones ni ahorros cargados en ${nombreMes(
+          mes
+        )}.`
+      );
+
+      return;
+    }
+
+    let mensaje =
+      `💰 Inversiones y ahorro — ${nombreMes(
+        mes
+      )}\n`;
+
+    for (const [
+      usuario,
+      monto,
+    ] of porUsuario) {
+      mensaje +=
+        `\n${usuario}: ${formatoPesos(
+          monto
+        )}`;
+    }
+
+    mensaje +=
+      `\n\nTotal familiar: ${formatoPesos(
+        total
+      )}`;
+
+    await ctx.reply(mensaje);
+  }
+);
+
+// ======================================================
 // AYUDA
 // ======================================================
 
@@ -2792,12 +3180,17 @@ bot.command(
       `Tarjetas $150000\n` +
       `Nafta $50000\n\n` +
 
+      `💰 Registrar inversión/ahorro:\n` +
+      `Inversion 200000\n` +
+      `Ahorro 150000\n\n` +
+
       `📊 Consultas:\n` +
       `/hoy — gastos de hoy\n` +
       `/mes — gastos del mes\n` +
       `/balance — balance familiar\n` +
       `/presupuestos — ver presupuestos\n` +
       `/proyeccion [meses] — próximos pagos por tarjeta (default 6)\n` +
+      `/inversiones — inversiones y ahorro del mes\n` +
       `/categorias — categorías reconocidas\n` +
       `/ultimo — último gasto\n\n` +
 
@@ -2871,16 +3264,18 @@ http
   );
 
 // ======================================================
-// REFRESCO AUTOMÁTICO DE PROYECCIÓN Y PAGOS DE TARJETA
+// REFRESCO AUTOMÁTICO DE TARJETAS_ACUMULADO Y PAGOS DE TARJETA
 // ======================================================
-// Lee cuotas_datos una sola vez, refresca la hoja "proyeccion" y
-// registra en "gastos" el pago del mes de cada tarjeta que todavía
-// no se hubiera volcado (ver registrarPagosDelMes).
+// Lee tarjetas_detalle una sola vez, refresca la hoja
+// "tarjetas_acumulado" y registra en "gastos" el pago del mes de
+// cada tarjeta que todavía no se hubiera volcado (ver
+// registrarPagosDelMes).
 
-async function actualizarProyeccionYPagos() {
-  const cuotas = await obtenerCuotasDatos();
+async function actualizarTarjetasYPagos() {
+  const cuotas =
+    await obtenerTarjetasDetalle();
 
-  await reconstruirProyeccionHorizontal(
+  await reconstruirTarjetasAcumulado(
     cuotas
   );
 
@@ -2898,14 +3293,14 @@ async function actualizarProyeccionYPagos() {
 setInterval(
   async () => {
     try {
-      await actualizarProyeccionYPagos();
+      await actualizarTarjetasYPagos();
 
       console.log(
-        "🔄 Proyección y pagos de tarjeta actualizados automáticamente"
+        "🔄 tarjetas_acumulado y pagos de tarjeta actualizados automáticamente"
       );
     } catch (error) {
       console.error(
-        "⚠️ Error actualizando proyección/pagos automáticamente:",
+        "⚠️ Error actualizando tarjetas_acumulado/pagos automáticamente:",
         error
       );
     }
@@ -2942,16 +3337,27 @@ setInterval(
 async function iniciar() {
   await asegurarPestañas();
 
+  try {
+    // Migración única cuotas_datos -> tarjetas_detalle (no hace
+    // nada si tarjetas_detalle ya tiene datos).
+    await migrarCuotasATarjetas();
+  } catch (error) {
+    console.error(
+      "⚠️ No pude migrar cuotas_datos a tarjetas_detalle:",
+      error
+    );
+  }
+
   await actualizarResumen();
 
   try {
     // Por si el bot estuvo apagado cuando cambió el mes, al
     // arrancar también chequeamos si hay pagos de tarjeta
     // pendientes de volcar a "gastos".
-    await actualizarProyeccionYPagos();
+    await actualizarTarjetasYPagos();
   } catch (error) {
     console.error(
-      "⚠️ No pude reconstruir la proyección / registrar pagos al iniciar:",
+      "⚠️ No pude reconstruir tarjetas_acumulado / registrar pagos al iniciar:",
       error
     );
   }
@@ -3023,6 +3429,12 @@ async function iniciar() {
     },
     {
       command:
+        "inversiones",
+      description:
+        "Inversiones y ahorro del mes",
+    },
+    {
+      command:
         "ultimo",
       description:
         "Último gasto",
@@ -3052,11 +3464,50 @@ async function iniciar() {
     },
   ]);
 
-  await bot.launch();
+  await lanzarBotConReintentos();
 
   console.log(
     "🤖 Esperancito está funcionando"
   );
+}
+
+// bot.launch() puede fallar por un problema temporal contra la API
+// de Telegram (timeout, error de red pasajero). En vez de tirar
+// abajo todo el proceso por eso, reintentamos cada ~15s hasta que
+// conecte. El servidor HTTP (para que Render detecte el puerto) ya
+// está escuchando de forma independiente, así que Render sigue
+// viendo el servicio arriba mientras tanto.
+async function lanzarBotConReintentos() {
+  const ESPERA_REINTENTO_MS = 15000;
+
+  let intento = 0;
+
+  while (true) {
+    intento++;
+
+    try {
+      await bot.launch();
+      return;
+    } catch (error) {
+      console.error(
+        `❌ Error al conectar con Telegram (intento ${intento}):`,
+        error
+      );
+
+      console.log(
+        `⏳ Reintentando en ${
+          ESPERA_REINTENTO_MS / 1000
+        }s...`
+      );
+
+      await new Promise(resolve =>
+        setTimeout(
+          resolve,
+          ESPERA_REINTENTO_MS
+        )
+      );
+    }
+  }
 }
 
 // Apagado prolijo: si no le avisamos a Telegraf que pare el
