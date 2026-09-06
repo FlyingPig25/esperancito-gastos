@@ -134,6 +134,12 @@ const aliases: Record<string, string> = {
   honorarios: "Profesionales",
   consulta: "Profesionales",
 
+  niñera: "Niñera",
+  ninera: "Niñera",
+  niñero: "Niñera",
+  ninero: "Niñera",
+  cuidadora: "Niñera",
+
   impuestos: "Impuestos",
   rentas: "Impuestos",
 
