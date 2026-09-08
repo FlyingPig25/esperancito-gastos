@@ -112,6 +112,7 @@ const aliases: Record<string, string> = {
 
   luz: "Servicios",
   gas: "Servicios",
+  "gas natural": "Servicios",
   agua: "Servicios",
   internet: "Servicios",
   telefonia: "Servicios",
@@ -139,6 +140,23 @@ const aliases: Record<string, string> = {
   niñero: "Niñera",
   ninero: "Niñera",
   cuidadora: "Niñera",
+
+  carniceria: "Carnicería",
+  carnicero: "Carnicería",
+  carne: "Carnicería",
+
+  verduleria: "Verdulería",
+  verduras: "Verdulería",
+  fruteria: "Verdulería",
+  frutas: "Verdulería",
+
+  veterinaria: "Veterinaria",
+  veterinario: "Veterinaria",
+  vet: "Veterinaria",
+
+  balanceado: "Balanceado",
+
+  bazar: "Bazar",
 
   impuestos: "Impuestos",
   rentas: "Impuestos",
