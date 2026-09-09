@@ -87,6 +87,26 @@ const aliases: Record<string, string> = {
   mastercard: "Tarjetas",
   amex: "Tarjetas",
 
+  // Tarjetas específicas: reconocidas solas ("Macro 5000") y con
+  // el prefijo "tarjeta" ("Tarjeta Macro 5000"), igual que ya
+  // pasaba con visa/master/amex.
+  macro: "Tarjetas",
+  "tarjeta macro": "Tarjetas",
+
+  naranja: "Tarjetas",
+  "tarjeta naranja": "Tarjetas",
+
+  mercadopago: "Tarjetas",
+  "mercado pago": "Tarjetas",
+  "tarjeta mercadopago": "Tarjetas",
+  "tarjeta mercado pago": "Tarjetas",
+
+  cordobesa: "Tarjetas",
+  "tarjeta cordobesa": "Tarjetas",
+
+  bna: "Tarjetas",
+  "tarjeta bna": "Tarjetas",
+
   nafta: "Combustible",
   gasoil: "Combustible",
   combustible: "Combustible",
