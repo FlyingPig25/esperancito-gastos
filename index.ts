@@ -884,8 +884,37 @@ const sesiones = new Map<
   Sesion
 >();
 
+// Cuándo se inició cada sesión, para poder vencerla si queda
+// abandonada (alguien arranca /ingreso, /presupuesto o /cuotas y
+// nunca contesta ni manda /cancelar). Sin esto, una sesión vieja
+// queda escuchando para siempre y se traga en silencio CUALQUIER
+// mensaje de texto posterior de esa persona — incluida la carga de
+// gastos normales o de inversión/ahorro — porque procesarSesion()
+// intercepta el texto antes de que llegue a esa lógica.
+const sesionesIniciadas = new Map<
+  string,
+  number
+>();
+
+const SESION_TTL_MS =
+  10 * 60 * 1000; // 10 minutos
+
 function cancelarSesion(ctx: any) {
-  sesiones.delete(claveSesion(ctx));
+  const clave = claveSesion(ctx);
+  sesiones.delete(clave);
+  sesionesIniciadas.delete(clave);
+}
+
+function iniciarSesion(
+  ctx: any,
+  sesion: Sesion
+) {
+  const clave = claveSesion(ctx);
+  sesiones.set(clave, sesion);
+  sesionesIniciadas.set(
+    clave,
+    Date.now()
+  );
 }
 
 // ======================================================
@@ -1080,7 +1109,7 @@ bot.command("deshacer", async ctx => {
 bot.command("ingreso", async ctx => {
   cancelarSesion(ctx);
 
-  sesiones.set(claveSesion(ctx), {
+  iniciarSesion(ctx, {
     tipo: "ingreso",
     paso: "persona",
   });
@@ -1149,8 +1178,19 @@ bot.command("balance", async ctx => {
     totalGastos += monto;
   }
 
+  // Las inversiones/ahorro se descuentan del saldo (es plata que
+  // se aparta), pero NO se suman a "Gastos" — no son consumo.
+  const {
+    total: totalInversiones,
+    porUsuario: inversionesPorUsuario,
+  } = await calcularInversionesDelMes(
+    mes
+  );
+
   const saldo =
-    totalIngresos - totalGastos;
+    totalIngresos -
+    totalGastos -
+    totalInversiones;
 
   let mensaje =
     `📊 Balance — ${nombreMes(mes)}\n\n` +
@@ -1171,7 +1211,26 @@ bot.command("balance", async ctx => {
   mensaje +=
     `\n\n💸 Gastos: ${formatoPesos(
       totalGastos
-    )}` +
+    )}`;
+
+  if (totalInversiones > 0) {
+    mensaje +=
+      `\n\n💰 Inversiones/Ahorro: ${formatoPesos(
+        totalInversiones
+      )}`;
+
+    for (
+      const [persona, total]
+      of inversionesPorUsuario
+    ) {
+      mensaje +=
+        `\n• ${persona}: ${formatoPesos(
+          total
+        )}`;
+    }
+  }
+
+  mensaje +=
     `\n\n${
       saldo >= 0 ? "✅" : "🔴"
     } Saldo: ${formatoPesos(saldo)}`;
@@ -1186,7 +1245,7 @@ bot.command("balance", async ctx => {
 bot.command("presupuesto", async ctx => {
   cancelarSesion(ctx);
 
-  sesiones.set(claveSesion(ctx), {
+  iniciarSesion(ctx, {
     tipo: "presupuesto",
     paso: "categoria",
   });
@@ -1303,7 +1362,7 @@ bot.command(
 bot.command("cuotas", async ctx => {
   cancelarSesion(ctx);
 
-  sesiones.set(claveSesion(ctx), {
+  iniciarSesion(ctx, {
     tipo: "cuotas",
     paso: "monto",
   });
@@ -2093,8 +2152,19 @@ async function generarResumenMensual() {
     );
   }
 
+  // Las inversiones/ahorro se descuentan del saldo pero NO se
+  // suman a "Gastos" — no son consumo.
+  const {
+    total: totalInversiones,
+    porUsuario: inversionesPorUsuario,
+  } = await calcularInversionesDelMes(
+    mes
+  );
+
   const saldo =
-    totalIngresos - totalGastos;
+    totalIngresos -
+    totalGastos -
+    totalInversiones;
 
   let mensaje =
     `📅 Resumen mensual — ${nombreMes(
@@ -2127,6 +2197,23 @@ async function generarResumenMensual() {
       `\n• ${persona}: ${formatoPesos(
         total
       )}`;
+  }
+
+  if (totalInversiones > 0) {
+    mensaje +=
+      `\n\n💰 Inversiones/Ahorro: ${formatoPesos(
+        totalInversiones
+      )}`;
+
+    for (const [
+      persona,
+      total,
+    ] of inversionesPorUsuario) {
+      mensaje +=
+        `\n• ${persona}: ${formatoPesos(
+          total
+        )}`;
+    }
   }
 
   mensaje +=
@@ -2577,6 +2664,23 @@ async function procesarSesion(
     sesiones.get(clave);
 
   if (!sesion) {
+    return false;
+  }
+
+  const iniciadaEn =
+    sesionesIniciadas.get(clave) ?? 0;
+
+  if (
+    Date.now() - iniciadaEn >
+    SESION_TTL_MS
+  ) {
+    // Diálogo abandonado hace rato (nadie contestó ni mandó
+    // /cancelar): lo descartamos en silencio y dejamos que este
+    // mensaje se procese como un mensaje normal, en vez de seguir
+    // tragándose todo lo que la persona escriba.
+    sesiones.delete(clave);
+    sesionesIniciadas.delete(clave);
+
     return false;
   }
 
@@ -3143,86 +3247,114 @@ bot.command(
 // ======================================================
 // INVERSIONES / AHORRO
 // ======================================================
+// Se descuentan del balance familiar (/balance y el resumen
+// mensual automático) pero NUNCA se suman a "Gastos": son plata
+// que se aparta, no consumo. calcularInversionesDelMes() es la
+// única fuente de este cálculo, para no repetirlo en cada lugar
+// que lo necesita.
+
+async function calcularInversionesDelMes(
+  mes: string
+) {
+  const filas = await obtenerFilas(
+    "inversiones",
+    "A2:F"
+  );
+
+  let total = 0;
+
+  const porUsuario = new Map<
+    string,
+    number
+  >();
+
+  for (const fila of filas) {
+    const fecha = normalizarFecha(
+      fila[0]
+    );
+
+    if (!fecha.startsWith(mes)) {
+      continue;
+    }
+
+    const usuario = String(
+      fila[2] ?? ""
+    );
+
+    const monto = numeroDesdeSheet(
+      fila[5]
+    );
+
+    if (!Number.isFinite(monto)) {
+      continue;
+    }
+
+    total += monto;
+
+    porUsuario.set(
+      usuario,
+      (porUsuario.get(usuario) ?? 0) +
+        monto
+    );
+  }
+
+  return { total, porUsuario };
+}
 
 bot.command(
   "inversiones",
   async ctx => {
     cancelarSesion(ctx);
 
-    const mes = mesActual();
+    try {
+      const mes = mesActual();
 
-    const filas =
-      await obtenerFilas(
-        "inversiones",
-        "A2:F"
-      );
-
-    let total = 0;
-
-    const porUsuario = new Map<
-      string,
-      number
-    >();
-
-    for (const fila of filas) {
-      const fecha =
-        normalizarFecha(fila[0]);
-
-      if (!fecha.startsWith(mes)) {
-        continue;
-      }
-
-      const usuario = String(
-        fila[2] ?? ""
-      );
-
-      const monto =
-        numeroDesdeSheet(fila[5]);
-
-      if (!Number.isFinite(monto)) {
-        continue;
-      }
-
-      total += monto;
-
-      porUsuario.set(
-        usuario,
-        (porUsuario.get(usuario) ??
-          0) + monto
-      );
-    }
-
-    if (total <= 0) {
-      await ctx.reply(
-        `Todavía no hay inversiones ni ahorros cargados en ${nombreMes(
+      const { total, porUsuario } =
+        await calcularInversionesDelMes(
           mes
-        )}.`
+        );
+
+      if (total <= 0) {
+        await ctx.reply(
+          `Todavía no hay inversiones ni ahorros cargados en ${nombreMes(
+            mes
+          )}.`
+        );
+
+        return;
+      }
+
+      let mensaje =
+        `💰 Inversiones y ahorro — ${nombreMes(
+          mes
+        )}\n`;
+
+      for (const [
+        usuario,
+        monto,
+      ] of porUsuario) {
+        mensaje +=
+          `\n${usuario}: ${formatoPesos(
+            monto
+          )}`;
+      }
+
+      mensaje +=
+        `\n\nTotal familiar: ${formatoPesos(
+          total
+        )}`;
+
+      await ctx.reply(mensaje);
+    } catch (error) {
+      console.error(
+        "❌ Error en /inversiones:",
+        error
       );
 
-      return;
+      await ctx.reply(
+        "❌ No pude consultar las inversiones. Si el error se repite, avisale a quien administra el bot."
+      );
     }
-
-    let mensaje =
-      `💰 Inversiones y ahorro — ${nombreMes(
-        mes
-      )}\n`;
-
-    for (const [
-      usuario,
-      monto,
-    ] of porUsuario) {
-      mensaje +=
-        `\n${usuario}: ${formatoPesos(
-          monto
-        )}`;
-    }
-
-    mensaje +=
-      `\n\nTotal familiar: ${formatoPesos(
-        total
-      )}`;
-
-    await ctx.reply(mensaje);
   }
 );
 
