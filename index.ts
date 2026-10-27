@@ -1,6 +1,20 @@
 import http from "http";
 import { Telegraf, Markup } from "telegraf";
 import { google } from "googleapis";
+import {
+  ESCRITURA_PLANILLA,
+  armarFilasResumen,
+  armarFilasTablero,
+  esFilaEnBlanco,
+  horaHHMM,
+  nombreMes,
+  normalizarFecha,
+  normalizarHora,
+  normalizarMes,
+  numeroDesdeSheet,
+  convertirMonto,
+  sumarMeses,
+} from "./logica.ts";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID!;
@@ -269,26 +283,6 @@ function normalizarTipoInversion(
 // UTILIDADES
 // ======================================================
 
-function convertirMonto(texto: string) {
-  return Number(
-    texto
-      .replace(/\$/g, "")
-      .replace(/\s/g, "")
-      .replace(/\./g, "")
-      .replace(",", ".")
-  );
-}
-
-function numeroDesdeSheet(valor: any) {
-  if (typeof valor === "number") return valor;
-
-  const numero = Number(valor);
-
-  return Number.isFinite(numero)
-    ? numero
-    : convertirMonto(String(valor));
-}
-
 function formatoPesos(valor: number) {
   return `$${valor.toLocaleString("es-AR", {
     maximumFractionDigits: 2,
@@ -302,11 +296,10 @@ function fechaArgentina() {
 }
 
 function horaArgentina() {
-  return new Date().toLocaleTimeString("es-AR", {
-    timeZone: "America/Argentina/Cordoba",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return horaHHMM(
+    new Date(),
+    "America/Argentina/Cordoba"
+  );
 }
 
 function mesActual() {
@@ -317,144 +310,6 @@ function usuarioTelegram(ctx: any) {
   return `${ctx.from.first_name}${
     ctx.from.last_name ? " " + ctx.from.last_name : ""
   }`;
-}
-
-function serialSheetsAFecha(serial: number) {
-  const base = new Date(Date.UTC(1899, 11, 30));
-  const fecha = new Date(
-    base.getTime() + serial * 86400000
-  );
-
-  return fecha.toISOString().slice(0, 10);
-}
-
-function normalizarFecha(valor: any) {
-  if (valor === undefined || valor === null) return "";
-
-  if (typeof valor === "number") {
-    return serialSheetsAFecha(valor);
-  }
-
-  const texto = String(valor).trim();
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(texto)) {
-    return texto;
-  }
-
-  if (/^\d{1,5}(\.\d+)?$/.test(texto)) {
-    return serialSheetsAFecha(Number(texto));
-  }
-
-  const partes = texto.split("/");
-
-  if (partes.length === 3) {
-    const [dia, mes, anio] = partes;
-
-    return `${anio.padStart(4, "0")}-${mes.padStart(
-      2,
-      "0"
-    )}-${dia.padStart(2, "0")}`;
-  }
-
-  return texto;
-}
-
-// Igual que normalizarFecha, pero para columnas "Mes" (formato
-// YYYY-MM: ingresos, presupuestos, cuotas_datos, cuotas_registros,
-// resumenes_enviados). Google Sheets, con USER_ENTERED, puede
-// reconocer un texto como "2026-08" como fecha y convertirlo a un
-// número de serie al guardarlo — si después se lo compara como
-// String(valor) sin pasar por acá, nunca va a matchear "2026-08"
-// y esa fila queda invisible para /balance, /presupuestos, la
-// proyección de cuotas, etc. aunque el dato esté bien cargado.
-function normalizarMes(valor: any) {
-  if (valor === undefined || valor === null) {
-    return "";
-  }
-
-  if (typeof valor === "number") {
-    return serialSheetsAFecha(
-      valor
-    ).slice(0, 7);
-  }
-
-  const texto = String(valor).trim();
-
-  if (/^\d{4}-\d{2}$/.test(texto)) {
-    return texto;
-  }
-
-  // Por si quedó guardada como fecha completa (texto) en vez de
-  // como serial numérico.
-  const fecha = normalizarFecha(texto);
-
-  if (
-    /^\d{4}-\d{2}-\d{2}$/.test(fecha)
-  ) {
-    return fecha.slice(0, 7);
-  }
-
-  return texto;
-}
-
-function normalizarHora(valor: any) {
-  if (typeof valor !== "number") {
-    return String(valor ?? "");
-  }
-
-  const fraccion = valor - Math.floor(valor);
-  const minutos = Math.round(fraccion * 24 * 60);
-
-  const horas = Math.floor(minutos / 60) % 24;
-  const mins = minutos % 60;
-
-  return `${String(horas).padStart(2, "0")}:${String(
-    mins
-  ).padStart(2, "0")}`;
-}
-
-function sumarMeses(mes: string, cantidad: number) {
-  const [anio, numeroMes] = mes.split("-").map(Number);
-
-  const fecha = new Date(
-    Date.UTC(anio, numeroMes - 1 + cantidad, 1)
-  );
-
-  return `${fecha.getUTCFullYear()}-${String(
-    fecha.getUTCMonth() + 1
-  ).padStart(2, "0")}`;
-}
-
-function nombreMes(mes: string) {
-  const [anio, numeroMes] = mes.split("-").map(Number);
-
-  return new Date(
-    Date.UTC(anio, numeroMes - 1, 1)
-  ).toLocaleDateString("es-AR", {
-    month: "long",
-    year: "numeric",
-    timeZone: "UTC",
-  });
-}
-
-function nombreMesCorto(mes: string) {
-  const [anio, numeroMes] = mes.split("-").map(Number);
-
-  const texto = new Date(
-    Date.UTC(anio, numeroMes - 1, 1)
-  ).toLocaleDateString("es-AR", {
-    month: "short",
-    timeZone: "UTC",
-  });
-
-  const limpio = texto
-    .replace(".", "")
-    .trim();
-
-  return (
-    limpio.charAt(0).toUpperCase() +
-    limpio.slice(1)
-  );
 }
 
 function formatoFechaCorta(
@@ -616,9 +471,8 @@ const estructuras: Record<string, string[]> = {
     "Fecha de envío",
   ],
 
-  // Pestaña histórica: ya no se escribe más acá (reemplazada por
-  // tarjetas_acumulado), pero se deja declarada para no perder el
-  // encabezado ni el contenido que ya tenía.
+  // El encabezado es dinámico (meses). No pisarlo acá: lo
+  // reescribe escribirTablero junto con tarjetas_acumulado.
   proyeccion: [
     "Usuario / Tarjeta",
   ],
@@ -693,7 +547,7 @@ async function asegurarPestañas() {
       await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
         range: `${nombre}!A1`,
-        valueInputOption: "USER_ENTERED",
+        valueInputOption: ESCRITURA_PLANILLA,
         requestBody: {
           values: [estructuras[nombre]],
         },
@@ -725,6 +579,175 @@ async function obtenerGastos() {
     "gastos",
     "A2:E"
   );
+}
+
+// Agrega filas al final de la tabla. OVERWRITE (no INSERT_ROWS):
+// insertar filas antes de escribir, sobre un rango de columnas
+// enteras, deja cada tanto una fila completamente vacía entre
+// movimientos. Tampoco escribimos filas en blanco.
+async function agregarFilas(
+  hoja: string,
+  rango: string,
+  filas: any[][]
+) {
+  const utiles = filas.filter(
+    fila => !esFilaEnBlanco(fila)
+  );
+
+  if (!utiles.length) return;
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${hoja}!${rango}`,
+    valueInputOption: ESCRITURA_PLANILLA,
+    insertDataOption: "OVERWRITE",
+    requestBody: {
+      values: utiles,
+    },
+  });
+}
+
+async function idDeHoja(titulo: string) {
+  const libro = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    fields: "sheets.properties(sheetId,title)",
+  });
+
+  return libro.data.sheets?.find(
+    h => h.properties?.title === titulo
+  )?.properties?.sheetId;
+}
+
+// values.clear borra el contenido pero no el formato. Si la celda
+// quedó como fecha, un número se sigue viendo como fecha.
+async function fijarFormato(
+  titulo: string,
+  rangos: {
+    startRow: number;
+    endRow: number;
+    startCol: number;
+    endCol: number;
+    tipo: "TEXT" | "NUMBER";
+  }[]
+) {
+  const sheetId = await idDeHoja(titulo);
+
+  if (typeof sheetId !== "number") return;
+
+  const requests = rangos
+    .filter(
+      rango =>
+        rango.endRow > rango.startRow &&
+        rango.endCol > rango.startCol
+    )
+    .map(rango => ({
+      repeatCell: {
+        range: {
+          sheetId,
+          startRowIndex: rango.startRow,
+          endRowIndex: rango.endRow,
+          startColumnIndex: rango.startCol,
+          endColumnIndex: rango.endCol,
+        },
+        cell: {
+          userEnteredFormat: {
+            numberFormat:
+              rango.tipo === "TEXT"
+                ? { type: "TEXT" }
+                : {
+                    type: "NUMBER",
+                    pattern: "#,##0.##",
+                  },
+          },
+        },
+        fields: "userEnteredFormat.numberFormat",
+      },
+    }));
+
+  if (!requests.length) return;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests,
+    },
+  });
+}
+
+function valorDeCelda(celda: any) {
+  const valor = celda?.effectiveValue;
+
+  if (!valor) return "";
+
+  if (typeof valor.numberValue === "number") {
+    return valor.numberValue;
+  }
+
+  if (typeof valor.stringValue === "string") {
+    return valor.stringValue;
+  }
+
+  if (typeof valor.boolValue === "boolean") {
+    return valor.boolValue;
+  }
+
+  return "";
+}
+
+// Fila real de la hoja (incluye filas vacías del medio). values.get
+// a veces no las devuelve y el índice deja de coincidir con la fila:
+// /deshacer borraría otro gasto.
+async function ultimaFilaDeUsuario(
+  usuario: string
+) {
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    ranges: ["gastos!A2:E"],
+    includeGridData: true,
+    fields:
+      "sheets(properties(sheetId,title),data(startRow,rowData(values(effectiveValue))))",
+  });
+
+  const hoja = meta.data.sheets?.find(
+    h => h.properties?.title === "gastos"
+  );
+
+  const sheetId = hoja?.properties?.sheetId;
+  const bloque = hoja?.data?.[0];
+
+  if (
+    typeof sheetId !== "number" ||
+    !bloque?.rowData
+  ) {
+    return null;
+  }
+
+  const startRow = bloque.startRow ?? 1;
+  const filas = bloque.rowData;
+
+  let encontrada: {
+    sheetId: number;
+    rowIndex: number;
+    fila: any[];
+  } | null = null;
+
+  for (let i = 0; i < filas.length; i++) {
+    const fila = (filas[i].values ?? []).map(
+      valorDeCelda
+    );
+
+    if (String(fila[2] ?? "") !== usuario) {
+      continue;
+    }
+
+    encontrada = {
+      sheetId,
+      rowIndex: startRow + i,
+      fila,
+    };
+  }
+
+  return encontrada;
 }
 
 // Suma los gastos (total familiar + por usuario) que caen dentro
@@ -781,59 +804,10 @@ function resumirGastos(
 async function actualizarResumen() {
   const gastos = await obtenerGastos();
 
-  const totales =
-    new Map<string, number>();
-
-  for (const fila of gastos) {
-    const [
-      fechaRaw,
-      ,
-      usuario,
-      ,
-      montoRaw,
-    ] = fila;
-
-    const fecha =
-      normalizarFecha(fechaRaw);
-
-    const monto =
-      numeroDesdeSheet(montoRaw);
-
-    if (!fecha || !usuario) continue;
-    if (!Number.isFinite(monto)) continue;
-
-    const mes = fecha.slice(0, 7);
-
-    const claves = [
-      `Diario|${fecha}|Familiar`,
-      `Diario|${fecha}|${usuario}`,
-      `Mensual|${mes}|Familiar`,
-      `Mensual|${mes}|${usuario}`,
-    ];
-
-    for (const clave of claves) {
-      totales.set(
-        clave,
-        (totales.get(clave) ?? 0) + monto
-      );
-    }
-  }
-
   const filas: any[][] = [
     estructuras.resumen,
+    ...armarFilasResumen(gastos),
   ];
-
-  for (const [clave, total] of totales) {
-    const [tipo, periodo, usuario] =
-      clave.split("|");
-
-    filas.push([
-      tipo,
-      periodo,
-      usuario,
-      total,
-    ]);
-  }
 
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SPREADSHEET_ID,
@@ -843,11 +817,30 @@ async function actualizarResumen() {
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
     range: "resumen!A1",
-    valueInputOption: "USER_ENTERED",
+    valueInputOption: ESCRITURA_PLANILLA,
     requestBody: {
       values: filas,
     },
   });
+
+  // Tipo, período y usuario como texto (si no, "2026-08" y
+  // "2026-08-01" vuelven a ser la misma fecha). El total, número.
+  await fijarFormato("resumen", [
+    {
+      startRow: 0,
+      endRow: filas.length,
+      startCol: 0,
+      endCol: 3,
+      tipo: "TEXT",
+    },
+    {
+      startRow: 1,
+      endRow: filas.length,
+      startCol: 3,
+      endCol: 4,
+      tipo: "NUMBER",
+    },
+  ]);
 }
 
 // ======================================================
@@ -1024,54 +1017,20 @@ bot.command("ultimo", async ctx => {
 bot.command("deshacer", async ctx => {
   cancelarSesion(ctx);
 
-  const gastos = await obtenerGastos();
-
   const usuario =
     usuarioTelegram(ctx);
 
-  let indice = -1;
+  const encontrada =
+    await ultimaFilaDeUsuario(usuario);
 
-  for (
-    let i = gastos.length - 1;
-    i >= 0;
-    i--
-  ) {
-    if (gastos[i][2] === usuario) {
-      indice = i;
-      break;
-    }
-  }
-
-  if (indice === -1) {
+  if (!encontrada) {
     await ctx.reply(
       "No encontré gastos tuyos para borrar."
     );
     return;
   }
 
-  const fila = gastos[indice];
-
-  const metadata =
-    await sheets.spreadsheets.get({
-      spreadsheetId: SPREADSHEET_ID,
-    });
-
-  const hoja =
-    metadata.data.sheets?.find(
-      h =>
-        h.properties?.title ===
-        "gastos"
-    );
-
-  const sheetId =
-    hoja?.properties?.sheetId;
-
-  if (sheetId === undefined) {
-    await ctx.reply(
-      "No pude encontrar la pestaña gastos."
-    );
-    return;
-  }
+  const fila = encontrada.fila;
 
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
@@ -1080,10 +1039,10 @@ bot.command("deshacer", async ctx => {
         {
           deleteDimension: {
             range: {
-              sheetId,
+              sheetId: encontrada.sheetId,
               dimension: "ROWS",
-              startIndex: indice + 1,
-              endIndex: indice + 2,
+              startIndex: encontrada.rowIndex,
+              endIndex: encontrada.rowIndex + 1,
             },
           },
         },
@@ -1519,15 +1478,11 @@ async function migrarCuotasATarjetas() {
     return 0;
   }
 
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: "tarjetas_detalle!A:I",
-    valueInputOption: "USER_ENTERED",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: {
-      values: filasNuevas,
-    },
-  });
+  await agregarFilas(
+    "tarjetas_detalle",
+    "A:I",
+    filasNuevas
+  );
 
   console.log(
     `✅ Migradas ${filasNuevas.length} cuota(s) de cuotas_datos a tarjetas_detalle`
@@ -1716,73 +1671,135 @@ async function reconstruirTarjetasAcumulado(
   const meses =
     construirMesesAdelante(12);
 
-  const { agrupado } = agruparCuotas(
-    cuotas,
-    meses
-  );
-
-  const encabezadoResumen = [
-    "Usuario / Tarjeta",
-    ...meses.map(nombreMes),
-  ];
-
-  const filasResumen: any[][] = [
-    encabezadoResumen,
-  ];
+  const { agrupado, detalleCompras } =
+    agruparCuotas(cuotas, meses);
 
   const gruposOrdenados =
     ordenarPorUsuarioYMedio([
       ...agrupado.values(),
     ]);
 
-  for (const grupo of gruposOrdenados) {
-    filasResumen.push([
-      `${grupo.usuario} — ${grupo.medio}`,
-      ...meses.map(
-        mes => grupo.montos.get(mes) ?? 0
-      ),
-    ]);
-  }
+  const detallesOrdenados = [
+    ...detalleCompras.values(),
+  ].sort((a, b) => {
+    const usuarioCompare =
+      a.usuario.localeCompare(b.usuario, "es");
 
-  // TOTAL FAMILIAR
-  const totalFamiliarPorMes =
-    new Map<string, number>();
-
-  for (const grupo of agrupado.values()) {
-    for (const mes of meses) {
-      totalFamiliarPorMes.set(
-        mes,
-        (totalFamiliarPorMes.get(mes) ?? 0) +
-          (grupo.montos.get(mes) ?? 0)
-      );
+    if (usuarioCompare !== 0) {
+      return usuarioCompare;
     }
-  }
 
-  filasResumen.push([
-    "TOTAL FAMILIAR",
-    ...meses.map(
-      mes =>
-        totalFamiliarPorMes.get(mes) ?? 0
-    ),
-  ]);
+    const medioCompare =
+      a.medio.localeCompare(b.medio, "es");
+
+    if (medioCompare !== 0) {
+      return medioCompare;
+    }
+
+    return a.concepto.localeCompare(
+      b.concepto,
+      "es"
+    );
+  });
+
+  const etiquetasMes = meses.map(nombreMes);
+
+  const filasResumen = armarFilasTablero(
+    meses,
+    etiquetasMes,
+    gruposOrdenados.map(grupo => ({
+      etiqueta: `${grupo.usuario} — ${grupo.medio}`,
+      montos: grupo.montos,
+    })),
+    detallesOrdenados.map(detalle => ({
+      etiqueta: `${detalle.usuario} — ${detalle.medio} — ${detalle.concepto}`,
+      montos: detalle.montos,
+    }))
+  );
+
+  // proyeccion dejó de reescribirse cuando se sumó
+  // tarjetas_acumulado, y ahí quedaron los meses convertidos en
+  // fechas. Se vuelven a escribir las dos con el mismo tablero.
+  await escribirTablero(
+    "tarjetas_acumulado",
+    filasResumen
+  );
+  await escribirTablero(
+    "proyeccion",
+    filasResumen
+  );
+
+  console.log(
+    "✅ tarjetas_acumulado y proyeccion actualizados"
+  );
+}
+
+async function escribirTablero(
+  hoja: string,
+  filas: any[][]
+) {
+  const columnas = filas.reduce(
+    (max, fila) => Math.max(max, fila.length),
+    1
+  );
 
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SPREADSHEET_ID,
-    range: "tarjetas_acumulado!A:Z",
+    range: `${hoja}!A:Z`,
   });
 
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: "tarjetas_acumulado!A1",
-    valueInputOption: "USER_ENTERED",
-    requestBody: {
-      values: filasResumen,
+  if (filas.length) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${hoja}!A1`,
+      valueInputOption: ESCRITURA_PLANILLA,
+      requestBody: {
+        values: filas,
+      },
+    });
+  }
+
+  const alto = Math.max(filas.length, 1);
+
+  const rangos: {
+    startRow: number;
+    endRow: number;
+    startCol: number;
+    endCol: number;
+    tipo: "TEXT" | "NUMBER";
+  }[] = [
+    {
+      startRow: 0,
+      endRow: alto,
+      startCol: 1,
+      endCol: columnas,
+      tipo: "NUMBER",
     },
+    {
+      startRow: 0,
+      endRow: alto,
+      startCol: 0,
+      endCol: 1,
+      tipo: "TEXT",
+    },
+  ];
+
+  filas.forEach((fila, indice) => {
+    if (
+      indice === 0 ||
+      fila[0] === "DETALLE DE COMPRAS"
+    ) {
+      rangos.push({
+        startRow: indice,
+        endRow: indice + 1,
+        startCol: 0,
+        endCol: columnas,
+        tipo: "TEXT",
+      });
+    }
   });
 
-  console.log(
-    "✅ tarjetas_acumulado actualizado"
-  );
+  await fijarFormato(hoja, rangos);
 }
 
 // ======================================================
@@ -1901,25 +1918,17 @@ async function registrarPagosDelMes(
     return [];
   }
 
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: "gastos!A:E",
-    valueInputOption: "USER_ENTERED",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: {
-      values: nuevosGastos,
-    },
-  });
+  await agregarFilas(
+    "gastos",
+    "A:E",
+    nuevosGastos
+  );
 
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: "cuotas_registros!A:E",
-    valueInputOption: "USER_ENTERED",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: {
-      values: nuevosRegistros,
-    },
-  });
+  await agregarFilas(
+    "cuotas_registros",
+    "A:E",
+    nuevosRegistros
+  );
 
   await actualizarResumen();
 
@@ -2052,19 +2061,15 @@ async function marcarResumenEnviado(
   tipo: string,
   periodo: string
 ) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: "resumenes_enviados!A:C",
-    valueInputOption: "USER_ENTERED",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: {
-      values: [[
-        tipo,
-        periodo,
-        `${fechaArgentina()} ${horaArgentina()}`,
-      ]],
-    },
-  });
+  await agregarFilas(
+    "resumenes_enviados",
+    "A:C",
+    [[
+      tipo,
+      periodo,
+      `${fechaArgentina()} ${horaArgentina()}`,
+    ]]
+  );
 }
 
 async function generarResumenSemanal() {
@@ -2363,15 +2368,11 @@ async function guardarCuotas(
     ]);
   }
 
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: "tarjetas_detalle!A:I",
-    valueInputOption: "USER_ENTERED",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: {
-      values: filas,
-    },
-  });
+  await agregarFilas(
+    "tarjetas_detalle",
+    "A:I",
+    filas
+  );
 
   await actualizarTarjetasYPagos();
 
@@ -2726,27 +2727,15 @@ async function procesarSesion(
       return true;
     }
 
-    await sheets.spreadsheets.values.append({
-      spreadsheetId:
-        SPREADSHEET_ID,
-
-      range:
-        "ingresos!A:C",
-
-      valueInputOption:
-        "USER_ENTERED",
-
-      insertDataOption:
-        "INSERT_ROWS",
-
-      requestBody: {
-        values: [[
-          mesActual(),
-          sesion.persona,
-          monto,
-        ]],
-      },
-    });
+    await agregarFilas(
+      "ingresos",
+      "A:C",
+      [[
+        mesActual(),
+        sesion.persona,
+        monto,
+      ]]
+    );
 
     sesiones.delete(clave);
 
@@ -2843,34 +2832,22 @@ async function procesarSesion(
           `presupuestos!C${numeroFila}`,
 
         valueInputOption:
-          "USER_ENTERED",
+          ESCRITURA_PLANILLA,
 
         requestBody: {
           values: [[monto]],
         },
       });
     } else {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId:
-          SPREADSHEET_ID,
-
-        range:
-          "presupuestos!A:C",
-
-        valueInputOption:
-          "USER_ENTERED",
-
-        insertDataOption:
-          "INSERT_ROWS",
-
-        requestBody: {
-          values: [[
-            mesActual(),
-            sesion.categoria,
-            monto,
-          ]],
-        },
-      });
+      await agregarFilas(
+        "presupuestos",
+        "A:C",
+        [[
+          mesActual(),
+          sesion.categoria,
+          monto,
+        ]]
+      );
     }
 
     sesiones.delete(clave);
@@ -3122,30 +3099,18 @@ bot.on(
         usuarioTelegram(ctx);
 
       try {
-        await sheets.spreadsheets.values.append({
-          spreadsheetId:
-            SPREADSHEET_ID,
-
-          range:
-            "inversiones!A:F",
-
-          valueInputOption:
-            "USER_ENTERED",
-
-          insertDataOption:
-            "INSERT_ROWS",
-
-          requestBody: {
-            values: [[
-              fechaArgentina(),
-              horaArgentina(),
-              usuarioInversion,
-              tipoInversion,
-              concepto,
-              monto,
-            ]],
-          },
-        });
+        await agregarFilas(
+          "inversiones",
+          "A:F",
+          [[
+            fechaArgentina(),
+            horaArgentina(),
+            usuarioInversion,
+            tipoInversion,
+            concepto,
+            monto,
+          ]]
+        );
 
         await ctx.reply(
           `✅ ${tipoInversion} — ${formatoPesos(
@@ -3185,29 +3150,17 @@ bot.on(
       usuarioTelegram(ctx);
 
     try {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId:
-          SPREADSHEET_ID,
-
-        range:
-          "gastos!A:E",
-
-        valueInputOption:
-          "USER_ENTERED",
-
-        insertDataOption:
-          "INSERT_ROWS",
-
-        requestBody: {
-          values: [[
-            fechaArgentina(),
-            horaArgentina(),
-            usuario,
-            categoria,
-            monto,
-          ]],
-        },
-      });
+      await agregarFilas(
+        "gastos",
+        "A:E",
+        [[
+          fechaArgentina(),
+          horaArgentina(),
+          usuario,
+          categoria,
+          monto,
+        ]]
+      );
 
       await actualizarResumen();
 
