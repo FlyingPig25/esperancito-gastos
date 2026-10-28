@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "tsx index.ts"
+    "start": "tsx index.ts",
+    "test": "tsx logica.test.ts"
   },
   "dependencies": {
     "googleapis": "^144.0.0",
